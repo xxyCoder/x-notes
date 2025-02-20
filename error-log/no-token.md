@@ -11,7 +11,7 @@
 # 触发可能
 
 1. 用户在支付时清除了cookie和storage并刷新（清除store），但是刷新后又会重新请求接口然后重新设置cookie、storage和store，故不可能；
-2. cookie、localStorage和store都读不到数据，百度了一下，ios safari无痕模式+禁止cookie下是无法使用cookie和storage的，使用会报错，这样一来，cookie没法存储数据，那么store中也无法存储。
+2. cookie、localStorage和store都读不到数据，百度了一下，ios safari在禁止cookie的模式下是无法使用cookie和storage的，使用会报错，这样一来，cookie没法存储数据，那么store中也无法存储。
    1. 对照打点看了一下，有个用户触发3DS后在当前页面卡住了，因为后续流程是从cookie中读取数据后才会进行下一步
 
 # 解决方法
