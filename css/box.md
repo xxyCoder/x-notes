@@ -1,17 +1,13 @@
-# content
+## content
 
-## 替换元素
+- content生成的文本是无法选中，同时屏幕阅读设备和搜索引擎也无法抓取
 
-- 通过修改某个属性使得呈现的内容可以被替换，替换元素都是内联元素
-- 尺寸计算为默认尺寸（规范定义为宽300px，高150px；各浏览器实现不一致）< 固有尺寸（原本内容大小）< HTML尺寸（html属性设置的宽和高） < css尺寸（css设置的宽和高）
-- 尺寸变化的本质并不是改变固有尺寸，而是采用了填充作为适配HTML尺寸和CSS尺寸的方式
-
-## 计数器
+### 计数器
 
 - counter-reset计数器重置为设定值或默认值0；IE和Firefox将小数当0处理，Chrome则是向下取整
-- counter-increment计数器递增，默认为1
+- counter-increment计数器递增，默认为1，出现在dom元素身上，计数器便会添加修改值一次
 - counter(name, style)，其实style支持的属性为list-style-type属性值
-- counters(name, string, style)嵌套技术，string为子序号的连接符
+- counters(name, string, style)嵌套技术，string为子序号的连接符，表现为上层节点的`${上层节点counter}${string连接符}${当前节点counter}`，如果当前节点覆盖上层节点的counter，则不会形成连接符
 
 ```css
 .counter {
