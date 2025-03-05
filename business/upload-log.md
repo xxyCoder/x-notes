@@ -70,11 +70,10 @@ new Worker(xlog)
 ### IOS Safari禁用cookie同时也会将Indexed DB禁止了怎么办？
 
 * 最好的办法是写一个抽象接口，对外抛出统一的使用方法；
-* 浏览器存储的API已经没有可用的，考虑使用Map数据类型变量存储，和使用Indexed DB存储数据的key value格式一致，由于读写不是异步的，不需要考虑在读取过程中有数据写入。至于刷新丢失就丢失了，只是尽量避免完全没有数据。
+* 浏览器存储的API已经没有可用的，考虑使用Map数据类型变量存储，和使用Indexed DB存储数据的key value格式一致。至于刷新丢失就丢失了，只是尽量避免完全没有数据。
 
 ```JavaScript
 interface XLogContainer {
-  timer: number | null
   destroy: () => void
   save: (data: { xlogData: XlogData }) => Promise<unknown>
   getAll: () => Promise<XlogData[]>
