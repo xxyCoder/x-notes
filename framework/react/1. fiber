@@ -1,0 +1,64 @@
+## root
+
+1. 整个应用的根，不是fiber节点
+2. 有个属性current，指向上次渲染的fiber树，还有一个属性workInProgress，指向当前正在更新的fiber树
+
+## render阶段
+
+1. 首次渲染会为每个节点创建一个fiber，更新阶段进行diff考虑是复用还是创建fiber
+2. 对于新建的fiber，会以链表形式挂载在上级fiber
+
+```ts
+const HostRoot = 'HostRoot' // root fiber
+const ClassComponent = 'ClassComponent'
+const HostComponent = 'HostComponent' // div p...
+const HostText = 'HostText' // 'xxx'
+const FunctionComponent = 'FunctionComponent'
+
+type FiberTag = typeof HostRoot | typeof ClassComponent | typeof HostComponent | typeof HostText | typeof FunctionComponent
+
+const NoFlags = 0
+const Placement = 0b10
+const Update = 0b100
+const Deletion = 0b1000
+type FiberEffectTag = typeof NoFlags | typeof Placement | typeof Update | typeof Deletion
+
+class Fiber {
+  tag: FiberTag
+  key: any
+  type: any
+  stateNode: any
+  child: Fiber | null
+  sibling: Fiber | null
+  return: Fiber | null
+  index: number
+  memoizedState: any
+  memoizedProps: any
+  pendingProps: any
+  effectTag: FiberEffectTag
+  firstEffect: any
+  lastEffect: any
+  nextEffect: any
+  constructor(tag: FiberTag, key: any, pendingProps: any) {
+    this.tag = tag // 表示当前fiber类型 （原生DOM类型、Text类型、Function、Class）
+    this.key = key
+
+    this.type = null // 真实dom类型 div p 'xxx'文本类型 Class Function
+    this.stateNode = null // fiber实例，document.createXXXNode、new Class()
+
+    this.child = null
+    this.sibling = null
+    this.return = null
+    this.index = 0 // {[node, node, node]} 数组类型子节点，会分配一个index标识
+
+    this.memoizedState = null // 当前fiber state
+    this.memoizedProps = null // props
+    this.pendingProps = pendingProps // 表示要更新的props
+    this.effectTag = NoFlags // 当前fiber状态
+
+    this.firstEffect = null // 链表，指向第一个要更新子节点的fiber
+    this.lastEffect = null
+    this.nextEffect = null // 表示下一个要更新的子fiber
+  }
+}
+```
