@@ -61,37 +61,3 @@ class Fiber {
   }
 }
 ```
-
-## render阶段
-
-1. 首次渲染会为每个节点创建一个fiber，更新阶段进行diff考虑是复用还是创建fiber
-2. 对于新建的fiber，会以链表形式挂载在上级fiber
-
-```ts
-class ReactRoot {
-  construct(container) {
-    this._internalRoot = this._createRoot(container)
-  }
-  _createRoot(container) {
-    const currenFiber = new Fiber(HostRoot, null, null)
-
-    const root = {
-      container,
-      current,
-      finishedWork: null
-    }
-    currenFiber.stateNode = root
-
-    return root
-  }
-  
-}
-
-const ReactDOM = {
-  render(reactElement, container, callback) {
-    const root = new ReactRoot(container)
-    
-    root.render(reactElement, callback)
-  }
-}
-```
