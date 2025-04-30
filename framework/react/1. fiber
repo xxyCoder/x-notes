@@ -50,14 +50,38 @@ class Fiber {
     this.memoizedState = null // 当前fiber state
     this.memoizedProps = null // props
     this.pendingProps = pendingProps // 表示要更新的props
-    this.effectTag = NoFlags // 当前fiber状态
+    this.flags = NoFlags // 当前fiber状态
+    this.subTreeFlags = NoFlags // 子树的fiber状态，update阶段通过子树是否有flag从而决定是否进行“递”
 
     this.firstEffect = null // 链表，指向第一个要更新子节点的fiber
     this.lastEffect = null
     this.nextEffect = null // 表示下一个要更新的子fiber
+    this.deletions = null // 需要被移除节点组件从链表
 
     this.alternate = null // workInprocess fiber指向对应的current fiber;而current fiber指向对应的workInProgress fiber
     this.updateQueue = null // 收集fiber更新的state
   }
+}
+```
+
+## 构建缓存树
+
+- 存在current和workInProgress指向的两颗fiber树，update阶段可以考虑复用current.alternate指向的fiber阶段；mount阶段则需要新建
+
+```js
+function createWorkInProgress(current, pendingProps) {
+  let wip = current.alternate
+  if (wip === null) {
+    wip = new Fiber(current.tag, current.key, pendingProps)
+    wip.stateNode = current.stateNode
+    wip.alternate = current
+    current.alternate = wip
+  } else {
+    wip.pendingProps = pendingProps
+    wip.flags = NoFlags
+    fiber.subTreeFlags = NoFlags
+    fiber.deletions = null
+  }
+  // ...
 }
 ```
