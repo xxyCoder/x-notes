@@ -47,7 +47,7 @@ class Fiber {
     this.return = null
     this.index = 0 // {[node, node, node]} 数组类型子节点，会分配一个index标识
 
-    this.memoizedState = null // 当前fiber state
+    this.memoizedState = null // 当前fiber state链表
     this.memoizedProps = null // props
     this.pendingProps = pendingProps // 表示要更新的props
     this.flags = NoFlags // 当前fiber状态
