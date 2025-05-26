@@ -1,36 +1,40 @@
 const enum XNodeType {
-  Text,
-  Element
+  Text = 3,
+  Element = 1
 }
 
 interface XNode {
-  children: XNode[];
+  childNodes?: XNode[];
   nodeType: XNodeType;
-  nodeValue?: string | XElement
+  nodeName: string
+  nodeValue?: string // 只有文本、注释和属性节点才有文本值
+  nextSibling?: XNode;
+  previousSibling?: XNode;
+  parentNode?: XNode; // element、document和documentFragment
 }
 
-type AttrMap = Record<string, string>;
+interface AttrMap {
+  name: string
+  value: string
+}
 
-interface XElement {
-  tagName: string;
-  attrs: AttrMap
+interface XElement extends XNode {
+  attributes: AttrMap
 }
 
 function xCreateTextNode(txt: string): XNode {
   return {
-    children: [],
+    nodeName: '#text',
     nodeType: XNodeType.Text,
     nodeValue: txt
   }
 }
 
-function xCreateElement(tagName: string, attrs: AttrMap, children:  XNode[]): XNode {
+function xCreateElement(tagName: string, attrs: AttrMap, childNodes: XNode[]): XElement {
   return {
-    children,
+    childNodes,
     nodeType: XNodeType.Element,
-    nodeValue: {
-      tagName,
-      attrs
-    }
+    nodeName: tagName,
+    attributes: attrs
   }
 }
