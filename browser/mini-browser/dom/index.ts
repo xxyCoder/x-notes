@@ -1,4 +1,4 @@
-const enum XNodeType {
+export const enum XNodeType {
   Text = 3,
   Element = 1
 }
