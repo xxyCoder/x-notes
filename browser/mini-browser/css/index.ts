@@ -1,7 +1,9 @@
-class XCSSStyleDeclaration {
+interface XCSSStyleDeclaration {
   cssText: string // CSS样式文本
   length: number // 样式属性的数量
   parentRule: XCSSRule | null // 如果该样式声明是某个规则的一部分，则为该规则
+  color: string // 示例属性，实际可包含更多CSS属性
+  fontSize: string 
 }
 
 class XCSSRule {
