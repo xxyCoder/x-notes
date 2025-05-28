@@ -6,11 +6,11 @@ interface XCSSStyleDeclaration {
   fontSize: string 
 }
 
-class XCSSRule {
+export class XCSSRule {
   cssText: string
   selectorText: string
   parentStyleSheet: XCSSStyleSheet | null
-  style: CSSStyleDeclaration
+  style: XCSSStyleDeclaration
 }
 
 class XCSSImportRule {
@@ -31,7 +31,7 @@ class XCSSMediaRule {
 
 type XCSSRuleList = (XCSSRule | XCSSImportRule | XCSSMediaRule)[]
 
-class XCSSStyleSheet {
+export class XCSSStyleSheet {
   disabled: boolean
   parentStyleSheet: XCSSStyleSheet | null
   cssRules: XCSSRuleList
