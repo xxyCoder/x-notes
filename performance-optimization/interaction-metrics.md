@@ -101,3 +101,48 @@ console.log("LCP 元素 URL（如果是图片）:", lcpEntry.url);
    1. [缩短资源加载时长](https://web.dev/articles/optimize-lcp?hl=zh-cn#reduce-resource-load-duration)
 4. 元素延迟渲染
    1. [消除元素渲染延迟](https://web.dev/articles/optimize-lcp?hl=zh-cn#2_eliminate_element_render_delay)
+  
+## TTI
+
+* [Time to Interactive](https://web.dev/articles/tti?hl=en)
+
+### 计算方式
+
+* 从FCP开始往后找到一个至少持续了5秒且没有长任务、并行未来请求不超过两个到窗口，从该窗口开始时间往后找到最后一个长任务的结束时间，如果没有则认为是FCP的位置
+
+### 如何优化
+
+* [如何提高TTI](https://web.dev/articles/tti#how_to_improve_tti)
+
+1. 优化FCP
+2. 减少JS工作时间
+3. 最小化并行请求数量
+
+## FID
+
+* [First Input Delay](https://web.dev/articles/fid)
+* 从用户首次与页面交互到浏览器实际能够开始执行事件处理以响应该交互的时间
+
+### 计算方式
+
+```JavaScript
+new PerformanceObserver((entryList) => {
+  for (const entry of entryList.getEntries()) {
+    const delay = entry.processingStart - entry.startTime;
+    console.log("FID candidate:", delay, entry);
+  }
+}).observe({ type: "first-input", buffered: true });
+```
+
+## TBT
+
+* [Total Blocking Time](https://web.dev/articles/tbt)
+* 总阻塞时间 (TBT) 指标测量FCP之后主线程被阻塞足够长的时间以阻止输入响应的总时间
+
+### 计算方式
+
+* 所有（长任务耗时-200ms）的总和
+
+### 如何优化
+
+1. 减少长任务
