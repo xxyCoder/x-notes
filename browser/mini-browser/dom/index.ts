@@ -3,10 +3,9 @@ export const enum XNodeType {
   Element = 1
 }
 
-
 type XNodeMethods = 'appendChild' | 'insertBefore' | 'removeChild' | 'replaceChild' | 'cloneNode';
 
-class XNode {
+export class XNode {
   childNodes: XNode[];
   nodeType: XNodeType;
   nodeName: string
@@ -124,7 +123,7 @@ interface AttrMap {
 
 type XElementMethods = 'setAttribute' | 'getAttribute' | 'removeAttribute' | 'hasAttribute'
 
-class XElement extends XNode {
+export class XElement extends XNode {
   attributes: AttrMap // HTML 元素的标准属性（即在标准中定义的属性），会自动成为元素节点对象的属性
   children: XElement[]; // 只包含元素节点的子节点
   constructor({ attributes, children, ...nodeParams }: Omit<XElement, XNodeMethods | XElementMethods>) {
@@ -156,7 +155,7 @@ class XElement extends XNode {
   }
 }
 
-function xCreateElement(tagName: string, attrs: AttrMap, childNodes: XNode[]): XElement {
+export function xCreateElement(tagName: string, attrs: AttrMap, childNodes: XNode[]): XElement {
   return new XElement({
     childNodes,
     nodeType: XNodeType.Element,
@@ -222,6 +221,6 @@ class XText extends XNode {
   }
 }
 
-function xCreateTextNode(data: string): XText {
+export function xCreateTextNode(data: string): XText {
   return new XText({ data })
 }

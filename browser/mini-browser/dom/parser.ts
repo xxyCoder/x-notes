@@ -125,7 +125,7 @@ class HTMLLexer {
   }
 }
 
-interface XNode {
+export interface XNode {
   nodeName: string
   childNodes: XNode[]
   attrs?: Record<string, string>;

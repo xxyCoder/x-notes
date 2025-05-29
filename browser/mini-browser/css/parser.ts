@@ -112,21 +112,21 @@ class CSSLexer {
   }
 }
 
-interface CSSRule {
+export interface XCSSRule {
   selectorText: string
   style: Record<string, string>[]
 }
 
-interface CSSAST {
+export interface XCSSAST {
   type: string
-  cssRules: Array<CSSRule>
+  cssRules: Array<XCSSRule>
 }
 
 class CSSParser {
   tokens: XToken[]
   position: number
-  ast: CSSAST
-  stack: (CSSAST | CSSRule)[]
+  ast: XCSSAST
+  stack: (XCSSAST | XCSSRule)[]
   constructor(tokens: XToken[]) {
     this.tokens = tokens;
     this.position = 0;
@@ -164,7 +164,7 @@ class CSSParser {
   }
 
   parseSelector() {
-    const currentSheet = this.currentToken as CSSAST;
+    const currentSheet = this.currentToken as XCSSAST;
     const token = this.tokens[this.position];
     const cssRule = {
       selectorText: token.selectorText!,
@@ -176,7 +176,7 @@ class CSSParser {
   }
 
   parseStyle() {
-    const currentRule = this.currentToken as CSSRule;
+    const currentRule = this.currentToken as XCSSRule;
     const token = this.tokens[this.position];
     ++this.position;
     currentRule.style.push({
