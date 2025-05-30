@@ -1,7 +1,7 @@
 import { XNode as XParserNode } from './dom/parser'
 import { XCSSAST, XCSSRule as XParserRule } from './css/parser'
 
-class StyleNode {
+export class StyleNode {
   node: XParserNode
   properties: Record<string, string>
   childrens: StyleNode[]
@@ -91,7 +91,9 @@ export default function traverseDOMTree(domAST: XParserNode, cssOM: XCSSAST) {
       }
     }
   }
-  dfs(domAST, rootStyleNode);
+  for (let i = 0; i < domAST.childNodes.length; ++i) {
+    dfs(domAST.childNodes[i], rootStyleNode);
+  }
   return rootStyleNode;
 }
 
