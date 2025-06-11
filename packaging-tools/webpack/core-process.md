@@ -37,23 +37,24 @@
    1. EntryPlugin（监听make钩子）或DynamicEntryPlugin
    2. Sourcemap插件
    3. RuntimePlugin
-      ```JavaScript
-      // WebpackOptionsApply.js
-      new EntryOptionPlugin().apply(compiler); // 内部注入EntryPlugin等plugins
 
-      if (options.optimization.splitChunks) {
-        const SplitChunksPlugin = require("./optimize/SplitChunksPlugin");
-        new SplitChunksPlugin(options.optimization.splitChunks).apply(compiler);
-      }
+   ```JavaScript
+   // WebpackOptionsApply.js
+   new EntryOptionPlugin().apply(compiler); // 内部注入EntryPlugin等plugins
 
-      if (options.optimization.runtimeChunk) {
-        const RuntimeChunkPlugin = require("./optimize/RuntimeChunkPlugin");
-        new RuntimeChunkPlugin(
-          /** @type {{ name?: (entrypoint: { name: string }) => string }} */
-          (options.optimization.runtimeChunk)
-        ).apply(compiler);
-      }
-      ```
+   if (options.optimization.splitChunks) {
+     const SplitChunksPlugin = require("./optimize/SplitChunksPlugin");
+     new SplitChunksPlugin(options.optimization.splitChunks).apply(compiler);
+   }
+
+   if (options.optimization.runtimeChunk) {
+     const RuntimeChunkPlugin = require("./optimize/RuntimeChunkPlugin");
+     new RuntimeChunkPlugin(
+       /** @type {{ name?: (entrypoint: { name: string }) => string }} */
+       (options.optimization.runtimeChunk)
+     ).apply(compiler);
+   }
+   ```
 7. 调用compiler.compile方法开始构建，触发compiler.hook.make钩子
 
 ### compiler对象
@@ -461,7 +462,7 @@
 ## 生成阶段
 
 1. 创建本次的ChunkGraph对象
-2. 遍历compilation.entries，为每一个入口调用addChunk方法创建chunk对象，同时创建一个Entrypoint chunk对象，并将入口对应的chunk设置为entrypoint的入口chunk
+2. 遍历compilation.entries，为每一个入口调用addChunk方法创建chunk对象，同时创建一个Entrypoint对象，并将入口对应的chunk设置为Entrypoint的入口chunk
 3. 遍历入口的Dependency集合，找到相应的module对象并将其关联到该chunk
 4. 如果配置了entry.runtime，还需要为其创建相应的chunk并直接分配给entry对应的ChunkGroup中
 5. 触发optimizeChunks等钩子进一步拆合chunk
@@ -474,13 +475,9 @@ class Compilation {
       this.outputOptions.hashFunction
     );
     this.chunkGraph = chunkGraph;
-
-    this.hooks.seal.call();
-    this.hooks.afterOptimizeDependencies.call(this.modules);
-    this.hooks.beforeChunks.call();
-
+    // ...
     this.moduleGraph.freeze("seal");
-    /** @type {Map<Entrypoint, Module[]>} */
+
     const chunkGraphInit = new Map();
     for (const [name, { dependencies, includeDependencies, options }] of this
       .entries) {
@@ -494,7 +491,6 @@ class Compilation {
       this.chunkGroups.push(entrypoint);
       connectChunkGroupAndChunk(entrypoint, chunk);
 
-      const entryModules = new Set();
       for (const dep of dependencies) {
         entrypoint.addOrigin(null, { name }, dep.request);
         // moduleGraph可以通过dep反向查找对应的module
@@ -502,7 +498,6 @@ class Compilation {
         if (module) {
           // 进行关联
           chunkGraph.connectChunkAndEntryModule(chunk, module, entrypoint);
-          entryModules.add(module);
           const modulesList = chunkGraphInit.get(entrypoint);
           if (modulesList === undefined) {
             chunkGraphInit.set(entrypoint, [module]);
@@ -520,6 +515,11 @@ class Compilation {
 ```
 
 5. 调用compilation.codeGeneration方法，为每一个module生成产物代码（将module转为可执行代码）
+
+   1. 遍历所有modules，收集module和module对应的entry name，最后执行_runCodeGenerationJobs方法
+   2. 在_runCodeGenerationJobs方法中遍历 modules 并为其调用_codeGenerationModule方法
+   3. 在_codeGenerationModule调用module的codeGeneration（不同类型的Module实例有不同的codeGeneration实现）方法，该方法内部主要是调用了JavascriptGenerator的generate方法
+
    ```JavaScript
    class Compilation {
      codeGeneration(callback) {
@@ -529,7 +529,7 @@ class Compilation {
        );
        const jobs = [];
        for (const module of this.modules) {
-         // 获取entry modules
+         // entry对应的名字，比如“main”
          const runtimes = chunkGraph.getModuleRuntimes(module);
          if (runtimes.size === 1) {
            for (const runtime of runtimes) {
@@ -617,5 +617,71 @@ class Compilation {
      }
    }
    ```
-6. 调用createChunkAssets为每一个chunk生成一个资产文件
-7. 写入磁盘，调用compiler.emitAssets方法
+6. 生成模块对应的产物
+
+   1. 首先遍历module的所有dependency，获取dependency对应的template（不同Dependency实例有不同的Template实现），调用template.apply方法对原始代码进行修改（每一个修改都是一个Replacement实例，包含了替换的开始和结束位置以及替换内容，Replacement实例存放在ReplaceSource中的_replacements属性中）或添加（添加内容存放在initFragments，每个fragments包含了添加在source开头或结尾的内容属性)
+   2. 调用addToSource方法，先合并fragments.getContent()，再合并source，最后合并fragments.getEndContent()，从而生成最终产物
+
+   ```JavaScript
+   class JavascriptGenerator {
+       generate(module, generateContext) {
+           // 先取出 module 的原始代码内容
+           const source = new ReplaceSource(module.originalSource());
+           const { dependencies, presentationalDependencies } = module;
+           const initFragments = [];
+           for (const dependency of [...dependencies, ...presentationalDependencies]) {
+               // 找到 dependency 对应的 template
+               const template = generateContext.dependencyTemplates.get(dependency.constructor);
+               // 调用 template.apply，传入 source、initFragments
+               // 在 apply 函数可以直接修改 source 内容，或者更改 initFragments 数组，影响后续转译逻辑
+               template.apply(dependency, source, {initFragments})
+           }
+           // 遍历完毕后，调用 InitFragment.addToSource 合并 source 与 initFragments
+           return InitFragment.addToSource(source, initFragments, generateContext);
+       }
+   }
+
+   // Dependency 子类
+   class xxxDependency extends Dependency {}
+
+   // Dependency 子类对应的 Template 定义
+   const xxxDependency.Template = class xxxDependencyTemplate extends Template {
+       apply(dep, source, {initFragments}) {
+           // 1. 直接操作 source，更改模块代码
+           source.replace(dep.range[0], dep.range[1] - 1, 'some thing')
+           // 2. 通过添加 InitFragment 实例，补充代码
+           initFragments.push(new xxxInitFragment())
+       }
+   }
+
+   class InitFragment {
+     static addToSource(source, initFragments, generateContext) {
+       // 先排好顺序
+       const sortedFragments = initFragments
+         .map(extractFragmentIndex)
+         .sort(sortFragmentWithIndex);
+       // ...
+
+       const concatSource = new ConcatSource();
+       const endContents = [];
+       for (const fragment of sortedFragments) {
+           // 合并 fragment.getContent 取出的片段内容
+         concatSource.add(fragment.getContent(generateContext));
+         const endContent = fragment.getEndContent(generateContext);
+         if (endContent) {
+           endContents.push(endContent);
+         }
+       }
+
+       // 合并 source
+       concatSource.add(source);
+       // 合并 fragment.getEndContent 取出的片段内容
+       for (const content of endContents.reverse()) {
+         concatSource.add(content);
+       }
+       return concatSource;
+     }
+   }
+   ```
+7. 遍历所有chunks，调用createChunkAssets生成一个资产文件
+8. 调用compiler.emitAssets方法输出资产文件
