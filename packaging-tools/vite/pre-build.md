@@ -131,7 +131,61 @@ async function scanImports(config) {
 }
 ```
 
+#### 如何记录依赖
+
+使用vite提供的插件即可，需要传入记录依赖的容器（一个对象），由ESBuild进行扫描，期间会调用各个插件，在resolve阶段就可以记录依赖了
+
+```JavaScript
+function esbuildScanPlugin(config, depImports) {
+  return {
+    name: "vite:dep-scan",
+    setup(build) {
+      build.onResolve(
+        {
+          // avoid matching windows volume
+          filter: /^[\w@][^:]/,
+        },
+        async ({ path: id, importer }) => {
+          // 如果在 optimizeDeps.exclude 列表或者已经记录过了，则将其 externalize (排除)，直接 return
+
+          // 接下来解析路径，内部调用各个插件的 resolveId 方法进行解析
+          const resolved = await resolve(id, importer);
+          if (resolved) {
+            if (shouldExternalizeDep(resolved, id)) {
+              return externalUnlessEntry({ path: id });
+            }
+
+            if (resolved.includes("node_modules") || include?.includes(id)) {
+              // 如果 resolved 为 js 或 ts 文件
+              if (OPTIMIZABLE_ENTRY_RE.test(resolved)) {
+                // 记录依赖
+                depImports[id] = resolved;
+              }
+              // 进行 externalize，因为这里只用扫描出依赖即可，不需要进行打包
+              return externalUnlessEntry({ path: id });
+            } else {
+              // resolved 为 「类 html」 文件，则标记上 'html' 的 namespace
+              const namespace = htmlTypesRE.test(resolved) ? "html" : undefined;
+              // linked package, keep crawling
+              return {
+                path: path.resolve(resolved),
+                namespace,
+              };
+            }
+          } else {
+            // 没有解析到路径，记录到 missing 表中，后续会检测这张表，显示相关路径未找到的报错
+            missing[id] = normalizePath(importer);
+          }
+        }
+      );
+    },
+  };
+}
+```
+
 ### 创建ESBuild构建器
+
+ESBuild可以将commonjs导入导出改写为ESM的语法规则，并将多个导入文件合并为一个文件避免请求瀑布流
 
 ```JavaScript
 function runOptimizeDeps(config, depsInfo) {
