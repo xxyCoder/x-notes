@@ -57,3 +57,59 @@ class Cache {}
 
 export default new Cache()
 ```
+
+## 原型模式
+
+### 定义
+
+用对象创建对象，而不是用类创建对象。
+
+### 目的
+
+从原型实例克隆出新的实例，对于那些有非常复杂的初始化过程的对象或者是需要耗费大量资源的情况，原型模式是更好的选择。
+
+### 类型
+
+1. 浅拷贝，可节约内存
+2. 深拷贝
+
+### 使用场景
+
+1. 当需要重复创建相似的复杂DOM元素时，使用克隆代替创建
+
+```JavaScript
+// 原型：模板元素
+const cardPrototype = document.getElementById("card-template").content;
+
+// 克隆创建新元素
+function createCard(data) {
+  const clone = document.importNode(cardPrototype, true);
+  clone.querySelector(".title").textContent = data.title;
+  clone.querySelector(".desc").textContent = data.desc;
+  return clone;
+}
+
+// 使用
+const newCard = createCard({ title: "Demo", desc: "Prototype Pattern" });
+document.body.appendChild(newCard);
+```
+
+2. 配置对象复用
+
+```JavaScript
+// 基础配置原型
+const baseConfig = {
+  apiUrl: "https://api.example.com",
+  timeout: 3000,
+  headers: { "Content-Type": "application/json" }
+};
+
+// 扩展配置
+const userConfig = Object.assign({}, baseConfig, {
+  endpoint: "/users",
+  auth: true
+});
+
+// 或使用解构
+const postConfig = { ...baseConfig, endpoint: "/posts" };
+```
