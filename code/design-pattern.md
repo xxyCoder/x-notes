@@ -113,3 +113,124 @@ const userConfig = Object.assign({}, baseConfig, {
 // 或使用解构
 const postConfig = { ...baseConfig, endpoint: "/posts" };
 ```
+
+## 工厂方法
+
+### 什么是工厂方法
+
+将创建过程封装成一个函数，由入参决定创建什么对象
+
+### 类型
+
+1. 简单工厂：一个全能工厂类负责所有产品的创建，适合类型固定、扩展需求少的场景
+2. 工厂：每个具体工厂只负责一种产品的创建，适合类型多变
+3. 抽象工厂
+
+### 目的
+
+针对在创建对象前需要执行复杂或大量初始化逻辑情况下，将这部分逻辑+创建对象抽离为一个工厂类，从而对业务逻辑和创建逻辑进行解耦合，可统一管理、方便扩展
+
+### 使用场景
+
+1. 动态组件创建（根据权限、类型或者系统类型渲染不同的UI组件、跨平台UI适配）
+
+```JavaScript
+interface ComponentFactory {
+  createButton(): React.FC
+}
+
+class PrimaryButtonFactory implements ComponentFactory {
+  createButton() {
+    return () => <button className="primary">Submit</button>;
+  }
+}
+
+class DisabledButtonFactory implements ComponentFactory {
+  createButton() {
+    return () => <button disabled>Disabled</button>;
+  }
+}
+
+const Admin = 1
+const useComponentFactory = () => {
+  const { userInfo } = useUserStore()
+  const isAdmin = userInfo?.flag === Admin ?? false
+  
+  const btnComp = isAdmin ? new PrimaryButtonFactory() : new DisabledButtonFactory()
+  
+  return {
+    btnComp
+  }
+}
+```
+
+```JavaScript
+class ComponentFactory {
+  static create(type: string) {
+    switch (type) {
+      case "button":
+        return new PrimaryButton();
+      case "input":
+        return new DisabledInput();
+      default:
+        throw new Error("Invalid type");
+    }
+  }
+}
+```
+
+2. 不同环境下API封装
+
+```JavaScript
+interface ApiClient {
+  fetchData(): Promise<any>;
+}
+
+class DevApiClient implements ApiClient {
+  async fetchData() {
+    return fetch("https://dev.api.com/data");
+  }
+}
+
+class ProdApiClient implements ApiClient {
+  async fetchData() {
+    return fetch("https://prod.api.com/data");
+  }
+}
+
+// 工厂方法
+function createApiClient(): ApiClient {
+  return process.env.NODE_ENV === "development" 
+    ? new DevApiClient() 
+    : new ProdApiClient();
+}
+```
+
+3. 数据解析器
+
+```JavaScript
+interface DataParser {
+  parse(data: string): any;
+}
+
+class JsonParser implements DataParser {
+  parse(data: string) {
+    return JSON.parse(data);
+  }
+}
+
+class XmlParser implements DataParser {
+  parse(data: string) {
+    // XML解析逻辑
+  }
+}
+
+// 工厂方法
+function createParser(type: string): DataParser {
+  switch (type) {
+    case "json": return new JsonParser();
+    case "xml": return new XmlParser();
+    default: throw new Error("Unsupported format");
+  }
+}
+```
