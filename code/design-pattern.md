@@ -234,3 +234,65 @@ function createParser(type: string): DataParser {
   }
 }
 ```
+
+## 生成器模式
+
+### 什么是生成器模式
+
+将多个简单的组件对象按照顺序组装，最终构建成一个复杂的对象
+
+### 目的
+
+把繁琐的构建过程从不同对象中抽离出来，实现使用同一套标准的制造工序产出不同产品
+
+### 抽象实现
+
+```JavaScript
+class Director {
+  private Builder builder;
+  public Process(Build _builder) {
+    this.builder = _builder
+  }
+  
+  public building() {
+    this.builder.buildBasement()
+    // ...
+    this.builder.buildWall()
+    // ...
+    this.builder.buildRoof()
+    // ...
+    this.builder.done()
+  }
+}
+```
+
+### 使用场景
+
+1. 统一的表格组件流程（都需要条件筛选、表格内容、分页器）
+
+```JavaScript
+const TableDirector = ({ builder }: { builder: Builder }) => {
+  const [page, setPage] = useState(0)
+  const { filterCriteriaNode, filterCriteriaData, searchData, onSearch } = builder.getFilterCriteria({
+    updateSearch: setPage
+  })
+  const { tableBody } = builder.getTableBody({
+    tableData: searchData
+  })
+  const { pagerNode } = builder.getPager({
+    page,
+    updatePage: (page) => {
+      setPage(page)
+      onSearch({
+        ...filterCriteriaData.current,
+        page
+      })
+    }
+  })
+  return (
+    {filterCriteriaNode}
+    {tableBody}
+    {pagerNode}
+  )
+}
+```
