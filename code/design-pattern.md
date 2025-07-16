@@ -296,3 +296,44 @@ const TableDirector = ({ builder }: { builder: Builder }) => {
   )
 }
 ```
+
+## 门面模式
+
+### 什么是门面模式
+
+将多个子接口封装起来，对外提供统一的高层接口
+
+### 目的
+
+实现一键操作，无需了解子系统细节，且子系统内部修改不影响客户端使用，减少了耦合
+
+### 使用场景
+
+1. 二次封装第三方库
+
+```JavaScript
+const request = axios.create({
+  baseURL,
+})
+
+setCommonRequestInterceptors(request)
+setCommonResponseInterceptors(request)
+
+const http = getHttp(request)
+
+export default http
+```
+
+2. 操作简化管理
+
+```JavaScript
+const login = async () => {
+  try {
+    await loginReq()
+    cookieStorage.set()
+    localStorage.set()
+  } catch(err) {
+  
+  }
+}
+```
