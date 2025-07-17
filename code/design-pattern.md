@@ -337,3 +337,114 @@ const login = async () => {
   }
 }
 ```
+
+## 组合模式
+
+### 什么是组合模式
+
+将对象组合成树形结构以表示整体/部分的层次结构，提取并抽象其相同部分，特殊化其不同的部分，以提高可复用性和可扩展性
+
+### 应用场景
+
+1. UI组件树
+```js
+// 抽象组件 (Component)  
+interface UIComponent {  
+  render(): JSX.Element;  
+}  
+
+// 叶子节点 (Leaf)  
+class Button implements UIComponent {  
+  render() { return <button>Click</button>; }  
+}  
+
+// 容器节点 (Composite)  
+class Modal implements UIComponent {  
+  private children: UIComponent[] = [];  
+
+  add(child: UIComponent) {  
+    this.children.push(child);  
+  }  
+
+  render() {  
+    return (  
+      <div className="modal">  
+        {this.children.map(child => child.render())}  
+      </div>  
+    );  
+  }  
+}  
+
+const modal = new Modal();  
+modal.add(new Button());  
+modal.add(new Button());  
+console.log(modal.render()); // 渲染包含两个按钮的弹窗
+```
+2. 嵌套表单
+```js
+class FormField implements UIComponent {  
+  constructor(private name: string) {}  
+
+  render() {  
+    return <input name={this.name} />;  
+  }  
+}  
+
+class Fieldset implements UIComponent {  
+  private fields: UIComponent[] = [];  
+
+  add(field: UIComponent) {  
+    this.fields.push(field);  
+  }  
+
+  render() {  
+    return (  
+      <fieldset>  
+        {this.fields.map(field => field.render())}  
+      </fieldset>  
+    );  
+  }  
+}  
+
+// 构建嵌套表单  
+const addressFieldset = new Fieldset();  
+addressFieldset.add(new FormField("city"));  
+addressFieldset.add(new FormField("zip"));  
+
+const mainForm = new Fieldset();  
+mainForm.add(new FormField("name"));  
+mainForm.add(addressFieldset); // 嵌套字段集
+```
+3. 侧边栏菜单
+```js
+class MenuItem implements UIComponent {  
+  constructor(private label: string) {}  
+
+  render() { return <li>{this.label}</li>; }  
+}  
+
+class DropdownMenu implements UIComponent {  
+  private items: UIComponent[] = [];  
+
+  add(item: UIComponent) {  
+    this.items.push(item);  
+  }  
+
+  render() {  
+    return (  
+      <ul>  
+        {this.items.map(item => item.render())}  
+      </ul>  
+    );  
+  }  
+}  
+
+// 创建多级菜单  
+const subMenu = new DropdownMenu();  
+subMenu.add(new MenuItem("Settings"));  
+subMenu.add(new MenuItem("Logout"));  
+
+const mainMenu = new DropdownMenu();  
+mainMenu.add(new MenuItem("Home"));  
+mainMenu.add(subMenu); // 嵌套子菜单  
+```
