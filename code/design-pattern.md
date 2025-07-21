@@ -448,3 +448,27 @@ const mainMenu = new DropdownMenu();
 mainMenu.add(new MenuItem("Home"));  
 mainMenu.add(subMenu); // 嵌套子菜单  
 ```
+
+## 装饰器模式
+
+### 什么是装饰器模式
+
+在程序运行时通过对原始对象进行包装完成装饰，同时不改变原始对象结构
+
+### 应用场景
+
+1. 高阶组件实现功能等增强
+```js
+// 基础组件
+const Button = () => <button>Click</button>;
+
+// 装饰器（高阶组件）
+const withLogging = (WrappedComponent) => {
+  return (props) => {
+    console.log(`组件被渲染: ${WrappedComponent.name}`);
+    return <WrappedComponent {...props} />;
+  };
+};
+
+const LoggedButton = withLogging(Button);
+```
