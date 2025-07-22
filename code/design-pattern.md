@@ -472,3 +472,81 @@ const withLogging = (WrappedComponent) => {
 
 const LoggedButton = withLogging(Button);
 ```
+
+## 适配器模式
+
+当一个对象或类的接口不能匹配用户所期待的接口时，适配器就充当中间转换的角色，以达到兼容用户接口的目的，同时适配器也实现了客户端与接口的解耦，提高了组件的可复用性
+
+### 什么时候使用
+
+1. 集成接口不统一时
+2. 升级库版本但是需要保留旧接口兼容性
+
+### 应用场景
+
+1. 第三方库兼容
+```js
+class LegacyLogger {
+  log(message) {
+    console.log(`[Legacy] ${message}`);
+  }
+}
+
+class NewLogger {
+  print(msg) {
+    console.log(`[New] ${msg}`);
+  }
+}
+
+class LoggerAdapter {
+  constructor(newLogger) {
+    this.logger = newLogger;
+  }
+  
+  log(message) {
+    this.logger.print(message); 
+  }
+}
+
+const logger = new LoggerAdapter(new NewLogger());
+logger.log("Hello");
+```
+
+2. 数据格式转换
+```js
+// 后端返回的数据（蛇形命名）
+const backendData = [
+  { user_id: 1, full_name: "Alice" },
+  { user_id: 2, full_name: "Bob" }
+];
+
+// 前端组件需要驼峰命名
+const dataAdapter = (data) => 
+  data.map(item => ({
+    userId: item.user_id,
+    fullName: item.full_name
+  }));
+
+const adaptedData = dataAdapter(backendData);
+```
+
+3. 统一不同库的接口
+```js
+// 统一图表配置接口
+class ChartAdapter {
+  constructor(chartLib) {
+    this.lib = chartLib;
+  }
+
+  render(data, options) {
+    if (this.lib.type === "echarts") {
+      this.lib.setOption({ data, ...options }); // ECharts 的配置方式
+    } else if (this.lib.type === "d3") {
+      this.lib.draw(data, options); // D3 的配置方式
+    }
+  }
+}
+
+const echartsAdapter = new ChartAdapter({ type: "echarts", setOption: echartsInstance.setOption });
+echartsAdapter.render(data, { color: "red" });
+```
