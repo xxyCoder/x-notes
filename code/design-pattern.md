@@ -550,3 +550,110 @@ class ChartAdapter {
 const echartsAdapter = new ChartAdapter({ type: "echarts", setOption: echartsInstance.setOption });
 echartsAdapter.render(data, { color: "red" });
 ```
+
+## 享元模式
+
+通过对细粒度对象的复用从而减少内存占用、提升性能
+
+### 核心概念
+
+1. 内部状态：不可变但可共享的部分
+2. 外部状态：变化并且不共享的部分，由外部传入
+3. 享元工厂：创建并管理对象的工厂，确保一个享元只被创建一次
+
+### 应用场景
+
+1. 大量重复的UI组件（列表、表格和日历）
+
+```JavaScript
+class ButtonFactory {
+  constructor() {
+    this.styles = {};
+  }
+  getStyle(styleType) {
+    if (!this.styles[styleType]) {
+      this.styles[styleType] = new ButtonStyle(styleType); // 创建内部状态
+    }
+    return this.styles[styleType];
+  }
+}
+
+// 内部状态：按钮样式
+class ButtonStyle {
+  constructor(type) {
+    this.type = type;
+    this.className = `btn-${type}`; // 共享的CSS类
+  }
+  render(text) {
+    const btn = document.createElement('button');
+    btn.className = this.className;
+    btn.textContent = text; // 外部状态由外部传入
+    return btn;
+  }
+}
+
+// 使用
+const factory = new ButtonFactory();
+const primaryStyle = factory.getStyle('primary'); // 共享样式
+
+// 创建1000个按钮，共享同一个样式对象
+const buttons = Array(1000).fill().map((_, i) => {
+  return primaryStyle.render(`Button ${i}`); // 外部状态：文本
+});
+```
+
+2. SVG等资源共享
+
+```JavaScript
+const GradientTag: FC<GradientTagProps> = ({...}) => {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox={`0 0 ${width} ${height}`}
+      {...props}
+    >
+      <defs>
+        <linearGradient id={id} x1="100%" x2="0%" y1="50%" y2="50%">
+          <stop offset="0%" stopColor={fromColor} />
+          <stop offset="100%" stopColor={toColor} />
+        </linearGradient>
+      </defs>
+      <g fill="none" fillRule="evenodd">
+        <path fillRule="evenodd" fill={`url(#${id})`} d={pathData} />
+        <path
+          fill={triangleColor}
+          d={`m0 ${mainHeight} h${realTriangleWidth} v${realTriangleHeight}z`}
+        />
+      </g>
+    </svg>
+  )
+}
+
+export default GradientTag
+```
+
+3. 虚拟滚动 （通过dom diff共享对象）
+
+```JavaScript
+const VirtualList = ({ items, rowHeight }) => {
+  const [scrollTop, setScrollTop] = useState(0);
+  const visibleCount = Math.ceil(viewportHeight / rowHeight);
+  
+  // 计算可见行范围
+  const startIdx = Math.floor(scrollTop / rowHeight);
+  const endIdx = startIdx + visibleCount;
+
+  return (
+    <div onScroll={e => setScrollTop(e.target.scrollTop)}>
+      <div style={{ height: `${items.length * rowHeight}px` }}>
+        {items.slice(startIdx, endIdx).map(item => (
+          // 复用DOM节点（内部状态：行样式）
+          <div key={item.id} style={{ height: rowHeight, top: item.index * rowHeight }}>
+            {item.text} {/* 外部状态：动态数据 */}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+```
