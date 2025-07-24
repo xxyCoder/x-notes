@@ -657,3 +657,61 @@ const VirtualList = ({ items, rowHeight }) => {
   );
 };
 ```
+
+## 桥接模式
+
+将抽象和实现分离，使二者可以各自单独变化而不受到对方约束，使用时再将其组合起来
+
+### 应用场景
+
+1. 跨平台通知
+
+```js
+// 实现部分：通知发送器
+class Notifier {
+  send(message) {
+    throw new Error("必须实现 send 方法");
+  }
+}
+
+// 具体实现：邮件通知
+class EmailNotifier extends Notifier {
+  send(message) {
+    console.log(`发送邮件：${message}`);
+    // 实际邮件发送逻辑
+  }
+}
+
+// 具体实现：短信通知
+class SMSNotifier extends Notifier {
+  send(message) {
+    console.log(`发送短信：${message}`);
+    // 实际短信发送逻辑
+  }
+}
+
+// 抽象部分：通知服务
+class NotificationService {
+  constructor(notifier) {
+    this.notifier = notifier;
+  }
+  
+  dispatch(message) {
+    throw new Error("必须实现 dispatch 方法");
+  }
+}
+
+// 扩展抽象：订单通知
+class OrderNotification extends NotificationService {
+  dispatch(message) {
+    console.log("[订单通知] 准备发送...");
+    this.notifier.send(`订单更新：${message}`);
+  }
+}
+
+const emailService = new OrderNotification(new EmailNotifier());
+emailService.dispatch("您的订单已发货"); 
+
+const smsService = new OrderNotification(new SMSNotifier());
+smsService.dispatch("包裹已送达");
+```
