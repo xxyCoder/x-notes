@@ -60,3 +60,19 @@ id属性也会被克隆，需要注意避免同一个dom出现两个相同id
 isEqualNode比较类型、属性和子节点
 
 isSameNode比较是否为同一个节点
+
+## NodeList
+
+对象节点的集合，类数组对象，但是可以使用forEach、keys、values和entries方法进行遍历（有些浏览器较为过时，可能没有实现forEach等方法）
+
+childNodes或querySelectorAll的返回值
+
+其中childNodes返回的NodeList是动态的，而querySelectorAll返回的NodeList是静态的
+
+## HTMLCollection
+
+元素的集合，类数组对象，没有相关的遍历方法，即时更新子项
+
+document.images、document.forms、document.links等返回值
+
+其中HTMLFormControlsCollection和HTMLOptionsCollection继承了该接口
