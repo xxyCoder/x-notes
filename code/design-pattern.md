@@ -715,3 +715,76 @@ emailService.dispatch("您的订单已发货");
 const smsService = new OrderNotification(new SMSNotifier());
 smsService.dispatch("包裹已送达");
 ```
+
+## 模版方法
+
+定义了操作中的算法骨架，而具体实现步骤推迟在子类中实现
+
+### 抽象实现
+
+```JavaScript
+// 1. 抽象类定义模板方法和步骤
+abstract class AbstractProcessor {
+  public process(): void {
+    this.stepOne();
+    this.stepTwo();
+    this.hook(); // 可选钩子
+    this.stepThree();
+  }
+
+  // 抽象步骤，必须由子类实现
+  protected abstract stepOne(): void;
+  protected abstract stepTwo(): void;
+
+  // 具体步骤 (可有默认实现)
+  protected stepThree(): void {
+    console.log("AbstractProcessor: Default stepThree implementation");
+  }
+
+  // 钩子方法 (可选覆盖，空实现)
+  protected hook(): void {}
+}
+
+// 2. 具体子类实现抽象步骤，可选覆盖钩子或具体步骤
+class ConcreteProcessorA extends AbstractProcessor {
+  protected stepOne(): void {
+    console.log("ConcreteProcessorA: Custom stepOne implementation");
+  }
+
+  protected stepTwo(): void {
+    console.log("ConcreteProcessorA: Custom stepTwo implementation");
+  }
+
+  // 覆盖钩子方法
+  protected hook(): void {
+    console.log("ConcreteProcessorA: Overridden hook");
+  }
+}
+
+class ConcreteProcessorB extends AbstractProcessor {
+  protected stepOne(): void {
+    console.log("ConcreteProcessorB: Custom stepOne implementation");
+  }
+
+  protected stepTwo(): void {
+    console.log("ConcreteProcessorB: Custom stepTwo implementation");
+  }
+
+  // 覆盖具体步骤
+  protected stepThree(): void {
+    console.log("ConcreteProcessorB: Overridden stepThree");
+  }
+}
+
+// 3. 客户端使用
+const processorA = new ConcreteProcessorA();
+processorA.process();
+
+const processorB = new ConcreteProcessorB();
+processorB.process();
+```
+
+### 应用场景
+
+1. 框架或组件生命周期钩子
+2. webpack等打包工具构建流程
