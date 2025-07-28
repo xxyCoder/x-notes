@@ -25,3 +25,15 @@ const componentMap = {
 }
 {componentId >= 0 && componentMap[componentId]}
 ```
+
+或者是
+
+```js
+const nodes = [
+  opt1 && node1,
+  opt2 && node2,
+  opt3 && node3
+]
+const node = nodes.find(item => item)
+{node}
+```
