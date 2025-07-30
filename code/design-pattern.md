@@ -788,3 +788,37 @@ processorB.process();
 
 1. 框架或组件生命周期钩子
 2. webpack等打包工具构建流程
+
+## 责任链
+
+责任链是由很多责任节点串联起来的一条任务链，允许请求者将责任链视为整体进行请求，不必关系具体流程走向，总之请求可以得到处理
+
+### 应用场景
+
+1. 事件处理（DOM事件冒泡）
+
+```js
+document.getElementById("parent").addEventListener("click", (e) => {
+  if (e.detail !== 2) {
+    e.stopPropagation();
+    // ...
+  }
+});
+```
+
+2. 中间件
+
+```js
+// Koa中间件示例
+app.use(async (ctx, next) => {
+  console.log('Middleware 1 start');
+  await next(); // 传递给下一个中间件
+  console.log('Middleware 1 end');
+});
+
+app.use(async (ctx, next) => {
+  console.log('Middleware 2 start');
+  ctx.body = 'Hello World';
+  // 不再调用next()，终止传递
+});
+```
