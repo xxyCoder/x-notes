@@ -822,3 +822,74 @@ app.use(async (ctx, next) => {
   // 不再调用next()，终止传递
 });
 ```
+
+## 策略模式
+
+定义了一系列算法，并将每个算法封装，使得它们可以相互替换
+
+### 应用场景
+
+1. 支付或者登陆方式的选择
+
+```JavaScript
+const useApplePay = () => {}
+
+const useWechatPay = () => {}
+
+const useLinkPay = () => {}
+
+const usePayment = (paymethod) => {
+  const { applePay } = useApplePay()
+  const { wechatPay } = useWechatPay()
+  const { linkPay } = useLinkPay()
+  
+  const payMethod = () => {
+    switch (paymethod) {
+     // ...
+    }
+  }
+  
+  return { payMethod }
+}
+```
+
+2. 国际化处理
+
+```JavaScript
+// 国际化策略
+const i18nStrategies = {
+  en: {
+    greeting: 'Hello',
+    farewell: 'Goodbye'
+  },
+  zh: {
+    greeting: '你好',
+    farewell: '再见'
+  },
+  ja: {
+    greeting: 'こんにちは',
+    farewell: 'さようなら'
+  }
+}
+
+class I18n {
+  constructor(locale = 'en') {
+    this.locale = locale
+  }
+  
+  setLocale(locale) {
+    this.locale = locale
+  }
+  
+  t(key) {
+    return i18nStrategies[this.locale][key] || key
+  }
+}
+
+const i18n = new I18n('zh')
+console.log(i18n.t('greeting'))
+```
+
+### 和工厂模式区别
+
+策略模式重在行为的选择与替换，工厂模式重在对象的创建
