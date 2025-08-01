@@ -24,3 +24,114 @@
 1. 没有被标记为只读，则在对象上添加新属性，形成屏蔽效果（屏蔽访问原型链上的相关属性）
 2. 如果标记为只读，则修改失败，在严格模式下抛出错误（为了模拟类属性的继承）
 3. 如果该属性是一个setter，则调用该setter函数
+
+## 类
+
+相当于Function + prototype + [[prototype]]的语法糖
+
+```JavaScript
+class Point {
+  #ppp = 'ppp'
+  #getP() {
+    return this.#ppp
+  }
+
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+  }
+
+  static name = "p1";
+  static getName() {
+    return this.name
+  }
+
+  toString() {
+    this.#getP()
+    return `(${this.x}, ${this.y})`;
+  }
+
+  get xxx() {
+    return this.x;
+  }
+
+  set xxx(value) {
+    this.x = value;
+  }
+}
+
+console.log(Object.getOwnPropertyDescriptors(Point.prototype))
+console.log(Object.getOwnPropertyDescriptors(Point))
+```
+
+1. 其中原型上的方法均不能枚举
+
+```JSON
+{
+  constructor: {
+    value: [class p1] { name: 'p1' },
+    writable: true,
+    enumerable: false,
+    configurable: true
+  },
+  toString: {
+    value: [Function: toString],
+    writable: true,
+    enumerable: false,
+    configurable: true
+  },
+  xxx: {
+    get: [Function: get xxx],
+    set: [Function: set xxx],
+    enumerable: false,
+    configurable: true
+  }
+}
+```
+
+2. 静态属性和静态方法（不可枚举）挂在类本身
+
+```JSON
+{
+  length: { value: 2, writable: false, enumerable: false, configurable: true },
+  name: { value: 'p1', writable: true, enumerable: true, configurable: true },
+  prototype: {
+    value: {},
+    writable: false,
+    enumerable: false,
+    configurable: false
+  },
+  getName: {
+    value: [Function: getName],
+    writable: true,
+    enumerable: false,
+    configurable: true
+  }
+} 
+```
+
+3. 私有方法和属性不挂在类或类的原型上，而是在编译时将其提出在类的外层，在调用私有属性或方法的地方进行代码替换，从而实现子类无法继承私有属性或方法
+
+```JavaScript
+var _ppp = /*#__PURE__*/ new WeakMap();
+
+constructor() {
+  _classPrivateFieldInitSpec(this, _ppp, 'ppp');
+}
+
+function _getP() {
+  return _classPrivateFieldGet(_ppp, this);
+}
+
+toString() {
+  _getP.call(this)
+}
+```
+
+### 类的继承
+
+也就是类的prototype的 [[prototype]] 指向父类的prototype
+
+其中supoer关键字在类实例方法，如果通过super设置属性，则代表this，其余情况都代表父类prototype
+
+super在静态方法，如果通过super设置属性，则代表this，其余情况都代表父类
