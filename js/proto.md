@@ -66,7 +66,7 @@ console.log(Object.getOwnPropertyDescriptors(Point))
 
 1. 其中原型上的方法均不能枚举
 
-```JSON
+```text
 {
   constructor: {
     value: [class p1] { name: 'p1' },
@@ -91,7 +91,7 @@ console.log(Object.getOwnPropertyDescriptors(Point))
 
 2. 静态属性和静态方法（不可枚举）挂在类本身
 
-```JSON
+```text
 {
   length: { value: 2, writable: false, enumerable: false, configurable: true },
   name: { value: 'p1', writable: true, enumerable: true, configurable: true },
