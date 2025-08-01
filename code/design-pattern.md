@@ -893,3 +893,79 @@ console.log(i18n.t('greeting'))
 ### 和工厂模式区别
 
 策略模式重在行为的选择与替换，工厂模式重在对象的创建
+
+## 备忘录模式
+
+捕获对象的内部状态并在需要时进行恢复
+
+### 使用场景
+
+1. 撤销/重做
+
+```JavaScript
+// 原发器（Editor）
+class Editor {
+  constructor() {
+    this.content = "";
+    this.lastSavedLength = 0; // 记录上次保存时的内容长度
+  }
+
+  type(text) {
+    this.content += text;
+  }
+
+  // 创建备忘录（保存增量内容）
+  save() {
+    const incrementalContent = this.content.slice(this.lastSavedLength);
+    const memento = new EditorMemento(incrementalContent, this.lastSavedLength);
+    this.lastSavedLength = this.content.length; // 更新上次保存位置
+    return memento;
+  }
+
+  // 恢复备忘录（恢复增量内容）
+  restore(memento) {
+    const { incrementalContent, startPosition } = memento.getData();
+    // 先恢复到上次保存的位置
+    this.content = this.content.slice(0, startPosition);
+    // 然后添加增量内容
+    this.content += incrementalContent;
+    this.lastSavedLength = this.content.length;
+  }
+
+  getContent() {
+    return this.content;
+  }
+}
+
+// 备忘录（存储增量状态）
+class EditorMemento {
+  constructor(incrementalContent, startPosition) {
+    this.incrementalContent = incrementalContent;
+    this.startPosition = startPosition;
+  }
+
+  getData() {
+    return {
+      incrementalContent: this.incrementalContent,
+      startPosition: this.startPosition
+    };
+  }
+}
+
+// 管理者（存储历史记录）
+class History {
+  constructor() {
+    this.states = [];
+  }
+
+  push(memento) {
+    this.states.push(memento);
+  }
+
+  pop() {
+    return this.states.pop();
+  }
+}
+```
+
+2. SPA的路由状态恢复
