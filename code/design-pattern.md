@@ -979,3 +979,48 @@ class History {
 1. 多个非父子组件或兄弟组件需要共享状态（vuex、redux、pinia）
 2. 事件总线
 3. 聊天室
+
+## 访问者模式
+
+允许将算法和操作对象分离，使得在不修改对象结构的前提下定义新的操作
+
+### 抽象实现
+
+```js
+class Visitor {
+  visit() {
+
+  }
+}
+
+class Container {
+  accept(visitor) {
+    visitor.visit(...)
+  }
+}
+```
+
+### 应用场景
+
+1. AST处理
+
+```js
+const MyVisitor = {
+  Identifier(path) {
+    console.log(`Visiting identifier: ${path.node.name}`);
+  },
+  
+  FunctionDeclaration(path) {
+    console.log('Visiting function declaration');
+    // 函数声明特定操作
+  },
+  
+  BinaryExpression(path) {
+    console.log('Visiting binary expression');
+    // 表达式特定操作
+  }
+};
+
+// 使用方式（在Babel插件中）
+traverse(ast, MyVisitor);
+```
