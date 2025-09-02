@@ -15,11 +15,13 @@ function postCleanEffect(effect: ReactiveEffect) {
   }
 }
 
-class ReactiveEffect<T = any> {
+export class ReactiveEffect<T = any> {
   private active = true
   _trackId = 0 // 记录effect执行了多少次，相同次数的effect再次记录则说明已经记录过了，不需要再次记录
   deps: ReturnType<typeof createDep>[] = []
   _depsLength = 0;
+
+  _running = 0 // 避免在effect更新依赖
 
   constructor(public fn: () => T, public scheduler: () => void) { }
 
@@ -35,9 +37,10 @@ class ReactiveEffect<T = any> {
       activeEffect = this
       // 清空上次收集的依赖
       preCleanEffect(this)
-
+      this._running++
       return this.fn()
     } finally {
+      this._running--
       // 清除多余的旧依赖
       postCleanEffect(this)
       activeEffect = lastEffect
@@ -58,13 +61,19 @@ export function effect<T = any>(fn: () => T, options?: any) {
 
   // 默认执行一次
   _effect.run()
-  return _effect
+  // options里面可以有scheduler选项
+  if (options) {
+    Object.assign(_effect, options)
+  }
+
+  // 外部调用run方法的时候不会丢失this绑定
+  return _effect.run.bind(_effect)
 }
 
 // Map { object: { attr: Map { effect_1, effect_2, effect_3 } } } 
 const depsMap = new Map<object, Map<string | symbol, ReturnType<typeof createDep>>>()
 
-function createDep(fn: () => void) {
+export function createDep(fn: () => void) {
   // fn是清理函数
   const dep = new Map<ReactiveEffect, number>()
   // @ts-ignore
@@ -124,8 +133,10 @@ export function trigger(target: object, key: string | symbol, newValue: any, old
   triggerEffect(keyDeps)
 }
 
-function triggerEffect(deps: Map<ReactiveEffect<any>, number>) {
+export function triggerEffect(deps: Map<ReactiveEffect<any>, number>) {
   for (const effect of deps.keys()) {
-    effect.scheduler?.()
+    if (!effect._running) {
+      effect.scheduler?.()
+    }
   }
 }

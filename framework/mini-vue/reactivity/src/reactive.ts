@@ -29,3 +29,7 @@ export function createReactiveObject(target: any) {
 
   return proxy
 }
+
+export function toReactive(value: any) {
+  return isObject(value) ? reactive(value) : value
+}
