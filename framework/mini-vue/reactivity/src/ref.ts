@@ -43,3 +43,7 @@ export function triggerRefValue(ref: RefImpl | ComputedRefImpl) {
     triggerEffect(dep)
   }
 }
+
+export function isRef(value: any): value is RefImpl {
+  return !!value && value.__v_isRef
+}
