@@ -1,3 +1,5 @@
+import { DirtyLevel } from "./constant"
+
 export let activeEffect: null | ReactiveEffect = null
 
 function preCleanEffect(effect: ReactiveEffect) {
@@ -23,9 +25,20 @@ export class ReactiveEffect<T = any> {
 
   _running = 0 // 避免在effect更新依赖
 
+  _dirtyLevel = DirtyLevel.Dirty // computed属性需要，如果是no dirty就不需要再次运行了
+
   constructor(public fn: () => T, public scheduler: () => void) { }
 
+  get dirty() {
+    return this._dirtyLevel === DirtyLevel.Dirty
+  }
+
+  set dirty(v: boolean) {
+    this._dirtyLevel = v ? DirtyLevel.Dirty : DirtyLevel.NoDirty
+  }
+
   run() {
+    this.dirty = false
     if (!this.active) {
       return this.fn()
     }
@@ -135,6 +148,9 @@ export function trigger(target: object, key: string | symbol, newValue: any, old
 
 export function triggerEffect(deps: Map<ReactiveEffect<any>, number>) {
   for (const effect of deps.keys()) {
+    if (effect._dirtyLevel < DirtyLevel.Dirty) {
+      effect._dirtyLevel = DirtyLevel.Dirty
+    }
     if (!effect._running) {
       effect.scheduler?.()
     }

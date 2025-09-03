@@ -1,4 +1,5 @@
-import { activeEffect, createDep, ReactiveEffect, trackEffect, triggerEffect } from "./effect"
+import { ComputedRefImpl } from "./computed"
+import { activeEffect, createDep, trackEffect, triggerEffect } from "./effect"
 import { toReactive } from "./reactive"
 
 export function ref(value: any) {
@@ -30,13 +31,13 @@ class RefImpl {
   }
 }
 
-function trackRefValue(ref: RefImpl) {
+export function trackRefValue(ref: RefImpl | ComputedRefImpl) {
   if (activeEffect) {
     trackEffect(activeEffect, ref.dep = ref.dep || createDep(() => ref.dep.clear()))
   }
 }
 
-function triggerRefValue(ref: RefImpl) {
+export function triggerRefValue(ref: RefImpl | ComputedRefImpl) {
   const dep = ref.dep
   if (dep) {
     triggerEffect(dep)

@@ -1,8 +1,5 @@
+import { ReactiveFlag } from "./constant"
 import { track, trigger } from "./effect"
-
-export enum ReactiveFlag {
-  IS_REACTIVE = "__v_isReactive"
-}
 
 export const mutableHandler: ProxyHandler<any> = {
   get(target, key, receiver) {

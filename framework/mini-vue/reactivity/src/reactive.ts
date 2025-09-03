@@ -1,5 +1,6 @@
 import { isObject } from "../../shared";
-import { mutableHandler, ReactiveFlag } from "./baseHandler";
+import { mutableHandler } from "./baseHandler";
+import { ReactiveFlag } from "./constant";
 
 export function reactive(target: any) {
   return createReactiveObject(target)
