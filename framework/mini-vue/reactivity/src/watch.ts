@@ -69,4 +69,10 @@ function doWatch(source: any, cb?: Function, options: WatchOptions = {}) {
     // watchEffect
     effect.run()
   }
+
+  const unwatch = () => {
+    effect.stop()
+  }
+
+  return unwatch
 }

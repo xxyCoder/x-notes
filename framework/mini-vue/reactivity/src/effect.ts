@@ -61,8 +61,12 @@ export class ReactiveEffect<T = any> {
   }
 
   stop() {
-    // 停止依赖收集
-    this.active = false
+    if (this.active) {
+      // 停止依赖收集
+      this.active = false
+      preCleanEffect(this)
+      postCleanEffect(this)
+    }
   }
 }
 
