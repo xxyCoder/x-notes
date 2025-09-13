@@ -128,19 +128,26 @@ function createRenderer(options: typeof renderOptions) {
 			keyToNewIndexMap.set(vnode.key, j)
 		}
 
+		const toBePatched = e2 - s2 + 1
+		const newIndexToOldIndexMap = new Array<number>(toBePatched).fill(0)
+
 		for (let j = s1; j <= e1; ++j) {
 			const oldVnode = c1[j]
 			const newVnodeIdx = keyToNewIndexMap.get(oldVnode.key)
 			if (isUndefined(newVnodeIdx)) {
 				unmount(oldVnode)
 			} else {
+				newIndexToOldIndexMap[newVnodeIdx - s2] = j + 1 // 保证位置上为0的元素是没有在该循环中比对过的
 				patch(oldVnode, c2[newVnodeIdx], container)
 			}
 		}
 
-		// 倒序插入
-		const toBePatched = e2 - s2 + 1
-		for (let j = toBePatched - 1; j >= 0; --j) {
+		// 获取最长递增子序列
+		// @ts-ignore
+		const increasingSeq = getSequence(newIndexToOldIndexMap)
+
+		// 倒序插入 + 最长子序列算法过滤不需要改动位置的元素
+		for (let j = toBePatched - 1, k = increasingSeq.length - 1; j >= 0; --j) {
 			const newIndex = s2 + j
 			const anchor = c2[newIndex + 1]?.el
 			const el = c2[newIndex].el
@@ -148,6 +155,10 @@ function createRenderer(options: typeof renderOptions) {
 			if (!el) {
 				patch(null, c2[newIndex], container, anchor)
 			} else {
+				if (j === increasingSeq[k]) {
+					--k
+					continue
+				}
 				hostInsert(el, container, anchor)
 			}
 		}
