@@ -1,14 +1,17 @@
 import {isString} from "../shared"
 import {ShapeFlags} from "../shared/shapeFlags"
 
+export const Text = Symbol('Text')
+export const Fragment = Symbol('Fragment')
+
 export interface VNode {
 	__v_isVNode: boolean
 	key: string | number
-	type: string
+	type: string | symbol
 	children?: VNode[] | string
 	props: Record<string, number | string | boolean | symbol>
 	shapeFlag: number
-	el: HTMLElement | null
+	el: Node | null
 }
 
 export const createVNode = (

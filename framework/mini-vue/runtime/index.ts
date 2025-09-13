@@ -2,7 +2,7 @@ import {isObject, isUndefined} from "../shared"
 import {ShapeFlags} from "../shared/shapeFlags"
 import nodeOptions from "./node-options"
 import patchProps from "./patch-props"
-import {isSameVNode, isVNode, VNode} from "./vnode"
+import {Fragment, isSameVNode, isVNode, Text, VNode} from "./vnode"
 
 const renderOptions = Object.assign({patchProps}, nodeOptions)
 
@@ -31,7 +31,7 @@ function createRenderer(options: typeof renderOptions) {
 		anchor?: HTMLElement | null
 	) => {
 		const {type, children, props, shapeFlag} = vnode
-		const el = hostCreateElement(type)
+		const el = hostCreateElement(type as string)
 		vnode.el = el
 
 		if (isObject(props)) {
@@ -50,7 +50,11 @@ function createRenderer(options: typeof renderOptions) {
 
 	const unmount = (vnode: VNode) => {
 		if (vnode.el) {
-			hostRemove(vnode.el)
+			if (vnode.type === Fragment) {
+				unmountChildren(vnode.children as VNode[])
+			} else {
+				hostRemove(vnode.el as HTMLElement)
+			}
 		}
 	}
 
@@ -109,7 +113,7 @@ function createRenderer(options: typeof renderOptions) {
 		if (i > e1) {
 			// 有新增
 			while (i <= e2) {
-				patch(null, c2[i], container, c2[e2 + 1]?.el)
+				patch(null, c2[i], container, c2[e2 + 1]?.el as HTMLElement)
 				++i
 			}
 		} else if (i > e2) {
@@ -153,13 +157,13 @@ function createRenderer(options: typeof renderOptions) {
 			const el = c2[newIndex].el
 
 			if (!el) {
-				patch(null, c2[newIndex], container, anchor)
+				patch(null, c2[newIndex], container, anchor as HTMLElement)
 			} else {
 				if (j === increasingSeq[k]) {
 					--k
 					continue
 				}
-				hostInsert(el, container, anchor)
+				hostInsert(el as HTMLElement, container, anchor as HTMLElement)
 			}
 		}
 	}
@@ -234,6 +238,29 @@ function createRenderer(options: typeof renderOptions) {
 		}
 	}
 
+	const processText = (n1: VNode | null, n2: VNode, container: HTMLElement) => {
+		if (n1 === null) {
+			hostInsert((n2.el = hostCreateText(n2.children as string)), container)
+		} else {
+			const el = (n2.el = n1.el)
+			if (n1.children! == n2.children) {
+				hostSetText(el!, n2.children as string)
+			}
+		}
+	}
+
+	const processFragment = (
+		n1: VNode | null,
+		n2: VNode,
+		container: HTMLElement
+	) => {
+		if (n1 === null) {
+			mountChildren(n2.children as VNode[], container)
+		} else {
+			patchChildren(n1, n2, container)
+		}
+	}
+
 	const patch = (
 		n1: VNode | null,
 		n2: VNode,
@@ -249,20 +276,33 @@ function createRenderer(options: typeof renderOptions) {
 			unmount(n1)
 			n1 = null
 		}
-		processElement(n1, n2, container, anchor)
+		const {type} = n2
+		switch (type) {
+			case Text:
+				processText(n1, n2, container)
+				break
+			case Fragment:
+				processFragment(n1, n2, container)
+				break
+			default:
+				processElement(n1, n2, container, anchor)
+		}
 	}
 
 	return {
 		render(vnode: VNode | null, container: HTMLElement) {
-			// @ts-ignore
-			if (vnode === null && container._vnode) {
+			if (vnode === null) {
 				// @ts-ignore
-				unmount(container._vnode)
+				if (container._vnode) {
+					// @ts-ignore
+					unmount(container._vnode)
+				}
+			} else {
+				// @ts-ignore
+				patch(container._vnode || null, vnode, container)
+				// @ts-ignore
+				container._vnode = vnode
 			}
-			// @ts-ignore
-			patch(container._vnode || null, vnode, container)
-			// @ts-ignore
-			container._vnode = vnode
 		},
 	}
 }

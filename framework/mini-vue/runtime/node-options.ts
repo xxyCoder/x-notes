@@ -1,9 +1,11 @@
+import {VNode} from "./vnode"
+
 export default {
-	insert(el: HTMLElement, container: HTMLElement, anchor?: HTMLElement | null) {
-		container.insertBefore(el, anchor || null)
+	insert(el: Node, container: Node, anchor?: Node | null) {
+		container?.insertBefore(el, anchor || null)
 	},
-	remove(el: HTMLElement) {
-		const parent = el.parentNode
+	remove(el: ChildNode) {
+		const parent = el?.parentNode
 		if (parent) {
 			el.remove()
 		}
@@ -14,16 +16,16 @@ export default {
 	createText(text: string) {
 		return document.createTextNode(text)
 	},
-	setElementText(el: HTMLElement, text: string) {
+	setElementText(el: Node, text: string) {
 		el.textContent = text
 	},
-	setText(el: HTMLElement, text: string) {
+	setText(el: Node, text: string) {
 		el.nodeValue = text
 	},
-	parentNode(el: HTMLElement) {
+	parentNode(el: Node) {
 		return el.parentNode
 	},
-	nextSibling(el: HTMLElement) {
+	nextSibling(el: Node) {
 		return el.nextSibling
 	},
 }
