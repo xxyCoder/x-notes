@@ -1,17 +1,25 @@
-import {isString} from "../shared"
+import {isObject, isString} from "../shared"
 import {ShapeFlags} from "../shared/shapeFlags"
+import {Instance} from "./instance"
 
-export const Text = Symbol('Text')
-export const Fragment = Symbol('Fragment')
+export const Text = Symbol("Text")
+export const Fragment = Symbol("Fragment")
+
+export interface Component {
+	data?: () => Record<string, unknown>
+	props: Record<string, unknown>
+	render: () => VNode
+}
 
 export interface VNode {
 	__v_isVNode: boolean
 	key: string | number
-	type: string | symbol
+	type: string | symbol | Component
 	children?: VNode[] | string
 	props: Record<string, number | string | boolean | symbol>
 	shapeFlag: number
 	el: Node | null
+	component?: Instance
 }
 
 export const createVNode = (
@@ -19,7 +27,11 @@ export const createVNode = (
 	props: Record<string, string | number | boolean | symbol>,
 	children?: VNode[] | string
 ): VNode => {
-	let shapeFlag = isString(type) ? ShapeFlags.ELEMENT : 0
+	let shapeFlag = isString(type)
+		? isObject(type)
+			? ShapeFlags.STATEFUL_COMPONENT
+			: ShapeFlags.ELEMENT
+		: 0
 
 	if (children) {
 		if (Array.isArray(children)) {

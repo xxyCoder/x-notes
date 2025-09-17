@@ -13,3 +13,7 @@ export function isString(target: any): target is string {
 export function isUndefined(target: any): target is undefined {
 	return typeof target === "undefined"
 }
+
+export function hasOwn(target: any, key: string | symbol) {
+	return Object.prototype.hasOwnProperty.call(target, key)
+}

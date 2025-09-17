@@ -1,8 +1,12 @@
+import {ReactiveEffect} from "../reactivity/src/effect"
+import {reactive} from "../reactivity/src/reactive"
 import {isObject, isUndefined} from "../shared"
 import {ShapeFlags} from "../shared/shapeFlags"
+import {createInstance, initProps} from "./instance"
 import nodeOptions from "./node-options"
 import patchProps from "./patch-props"
-import {Fragment, isSameVNode, isVNode, Text, VNode} from "./vnode"
+import {queneJob} from "./scheduler"
+import {Component, Fragment, isSameVNode, isVNode, Text, VNode} from "./vnode"
 
 const renderOptions = Object.assign({patchProps}, nodeOptions)
 
@@ -261,6 +265,55 @@ function createRenderer(options: typeof renderOptions) {
 		}
 	}
 
+	const mountComponent = (
+		vnode: VNode,
+		container: HTMLElement,
+		anchor?: HTMLElement | null
+	) => {
+		const {
+			data = () => {},
+			render,
+			props: propOptions = {},
+		} = vnode.type as Component
+
+		const state = reactive(data())
+		const instance = (vnode.component = createInstance({
+			state,
+			vnode,
+			propOptions,
+		}))
+		initProps(instance, vnode.props)
+		const componentUpdateFn = () => {
+			const subTree = render.call(instance.proxy, instance.proxy)
+
+			patch(instance.subTree, subTree, container, anchor)
+			instance.subTree = subTree
+			instance.isMounted = true
+		}
+
+		const effect = new ReactiveEffect(componentUpdateFn, () => queneJob(update))
+
+		const update = (instance.updateFn = () => {
+			effect.run()
+		})
+		update()
+	}
+
+	const patchComponent = () => {}
+
+	const processComponent = (
+		n1: VNode | null,
+		n2: VNode,
+		container: HTMLElement,
+		anchor?: HTMLElement | null
+	) => {
+		if (n1 === null) {
+			mountComponent(n2, container, anchor)
+		} else {
+			patchComponent()
+		}
+	}
+
 	const patch = (
 		n1: VNode | null,
 		n2: VNode,
@@ -276,7 +329,7 @@ function createRenderer(options: typeof renderOptions) {
 			unmount(n1)
 			n1 = null
 		}
-		const {type} = n2
+		const {type, shapeFlag} = n2
 		switch (type) {
 			case Text:
 				processText(n1, n2, container)
@@ -285,7 +338,11 @@ function createRenderer(options: typeof renderOptions) {
 				processFragment(n1, n2, container)
 				break
 			default:
-				processElement(n1, n2, container, anchor)
+				if (shapeFlag & ShapeFlags.ELEMENT) {
+					processElement(n1, n2, container, anchor)
+				} else if (shapeFlag & ShapeFlags.COMPONENT) {
+					processComponent(n1, n2, container, anchor)
+				}
 		}
 	}
 
