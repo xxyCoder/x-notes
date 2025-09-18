@@ -1,5 +1,6 @@
 import {reactive} from "../reactivity/src/reactive"
 import {hasOwn, isObject} from "../shared"
+import {ShapeFlags} from "../shared/shapeFlags"
 import {VNode} from "./vnode"
 
 export interface Instance {
@@ -12,10 +13,12 @@ export interface Instance {
 	propOptions: Record<string, unknown>
 	isMounted: boolean
 	proxy: null | Instance
+	slots: VNode["children"]
 }
 
 const publicProperty = {
 	atts: (instance: Instance) => instance.attrs,
+	slots: (instance: Instance) => instance.slots,
 }
 
 export function createInstance({
@@ -37,6 +40,7 @@ export function createInstance({
 		attrs: {},
 		propOptions,
 		proxy: null,
+		slots: {}
 	}
 
 	instance.proxy = new Proxy(instance, {
@@ -81,4 +85,12 @@ export function initProps(instance: Instance, rawProps: VNode["props"]) {
 	}
 	instance.attrs = attrs
 	instance.props = props
+}
+
+export function initSlots(instance: Instance, children: VNode["children"]) {
+	if (instance.vnode.shapeFlag & ShapeFlags.SLOTS_CHILDREN) {
+		instance.slots = children
+	} else {
+		instance.slots = {}
+	}
 }

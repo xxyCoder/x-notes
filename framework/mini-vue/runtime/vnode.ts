@@ -15,7 +15,7 @@ export interface VNode {
 	__v_isVNode: boolean
 	key: string | number
 	type: string | symbol | Component
-	children?: VNode[] | string
+	children?: VNode[] | string | Record<string, unknown>
 	props: Record<string, number | string | boolean | symbol>
 	shapeFlag: number
 	el: Node | null
@@ -36,6 +36,8 @@ export const createVNode = (
 	if (children) {
 		if (Array.isArray(children)) {
 			shapeFlag |= ShapeFlags.ARRAY_CHILDREN
+		} else if (isObject(children)) {
+			shapeFlag |= ShapeFlags.SLOTS_CHILDREN
 		} else {
 			shapeFlag |= ShapeFlags.TEXT_CHILDREN
 		}

@@ -2,7 +2,7 @@ import {ReactiveEffect} from "../reactivity/src/effect"
 import {reactive} from "../reactivity/src/reactive"
 import {isObject, isUndefined} from "../shared"
 import {ShapeFlags} from "../shared/shapeFlags"
-import {createInstance, initProps} from "./instance"
+import {createInstance, initProps, initSlots} from "./instance"
 import nodeOptions from "./node-options"
 import patchProps from "./patch-props"
 import {queneJob} from "./scheduler"
@@ -283,6 +283,7 @@ function createRenderer(options: typeof renderOptions) {
 			propOptions,
 		}))
 		initProps(instance, vnode.props)
+		initSlots(instance, vnode.children)
 		const componentUpdateFn = () => {
 			const subTree = render.call(instance.proxy, instance.proxy)
 
