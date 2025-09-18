@@ -1,5 +1,5 @@
 import {reactive} from "../reactivity/src/reactive"
-import {hasOwn, isObject} from "../shared"
+import {hasOwn, isFunction, isObject} from "../shared"
 import {ShapeFlags} from "../shared/shapeFlags"
 import {VNode} from "./vnode"
 
@@ -14,6 +14,7 @@ export interface Instance {
 	isMounted: boolean
 	proxy: null | Instance
 	slots: VNode["children"]
+	emit: (event: string, payload: unknown[]) => void
 }
 
 const publicProperty = {
@@ -40,7 +41,14 @@ export function createInstance({
 		attrs: {},
 		propOptions,
 		proxy: null,
-		slots: {}
+		slots: {},
+		emit: (event, ...payload) => {
+			const eventName = `on${event[0].toUpperCase()}${event.slice(1)}`
+			const handler = vnode.props[eventName] as unknown as Function
+			if (isFunction(handler)) {
+				handler(...payload)
+			}
+		}
 	}
 
 	instance.proxy = new Proxy(instance, {

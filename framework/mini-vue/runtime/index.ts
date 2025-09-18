@@ -56,6 +56,11 @@ function createRenderer(options: typeof renderOptions) {
 		if (vnode.el) {
 			if (vnode.type === Fragment) {
 				unmountChildren(vnode.children as VNode[])
+			} else if (vnode.shapeFlag & ShapeFlags.COMPONENT) {
+				const subTree = vnode.component?.subTree
+				if (subTree) {
+					unmount(subTree)
+				}
 			} else {
 				hostRemove(vnode.el as HTMLElement)
 			}
