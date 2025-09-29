@@ -47,3 +47,17 @@ export class FiberNode {
 		this.updateQueue = null
 	}
 }
+
+export class FiberRootNode {
+	containerInfo: Element
+	current: FiberNode
+	finishedWork: FiberNode | null
+
+	constructor(container: Element, hostRootFiber: FiberNode) {
+		this.containerInfo = container
+		this.current = hostRootFiber
+		hostRootFiber.stateNode = this
+
+		this.finishedWork = null
+	}
+}
