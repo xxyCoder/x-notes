@@ -1,7 +1,7 @@
 import {Props} from "../shared/ReactTypes"
 import beginWork from "./beginWork"
 import completeWork from "./completeWork"
-import {FiberNode} from "./fiber"
+import {FiberNode, FiberRootNode} from "./fiber"
 import {NoFlags} from "./fiberFlags"
 import {HostRoot} from "./workTags"
 
@@ -28,11 +28,11 @@ function markUpdateFromFiberToRoot(fiber: FiberNode) {
 	return null
 }
 
-function prepareFreshStack(fiber: FiberNode) {
-	workInProgress = createWorkInProgress(fiber, {})
+function prepareFreshStack(fiber: FiberRootNode) {
+	workInProgress = createWorkInProgress(fiber.current, {})
 }
 
-function renderRoot(root: FiberNode) {
+function renderRoot(root: FiberRootNode) {
 	prepareFreshStack(root)
   do {
     try {
@@ -42,12 +42,17 @@ function renderRoot(root: FiberNode) {
       workInProgress = null
     }
   } while(true)
+	const finishedWork = root.current.alternate
+	root.finishedWork = finishedWork
+
+	// commitRoot(root)
 }
 
 function workLoop() {
   while (workInProgress !== null) {
 		performUnitOfWork(workInProgress)
 	}
+	
 }
 
 function performUnitOfWork(fiber: FiberNode) {
@@ -73,7 +78,7 @@ function completeUnitOfWork(fiber: FiberNode) {
 		node = node.return
 		workInProgress = node
 	} while (node !== null)
-}
+} 
 
 function createWorkInProgress(current: FiberNode, pendingProps: Props) {
 	let wip = current.alternate
