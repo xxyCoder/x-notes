@@ -7,6 +7,7 @@ import {HostRoot} from "./workTags"
 
 let workInProgress: FiberNode | null = null
 
+// 更新的触发可以从fiber树中任意一个fiber node开始
 export function scheduleUpdateOnFiber(fiber: FiberNode) {
 	const root = markUpdateFromFiberToRoot(fiber)
 

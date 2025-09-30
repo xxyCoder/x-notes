@@ -1,8 +1,9 @@
 export type Key = any
 export type Ref = any
-export type SingleChildren = ReactElementType | string
-export type Props = Record<string, string> & {
+export type SingleChildren = ReactElementType | string | number
+export type Props = {
 	children?: SingleChildren | SingleChildren[]
+	content?: string | number
 }
 export type Type = string | ((props?: Props) => ReactElementType) | null
 export type Action<State> = State | ((prevState: State) => State)

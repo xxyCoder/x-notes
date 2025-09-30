@@ -1,6 +1,7 @@
-import {Key, Props, Ref, Type} from "../shared/ReactTypes"
+import {Key, Props, ReactElementType, Ref, SingleChildren, Type} from "../shared/ReactTypes"
 import {Flags, NoFlags} from "./fiberFlags"
-import {WorkTag} from "./workTags"
+import {UpdateQueue} from "./updateQueue"
+import {FunctionComponent, HostComponent, HostText, WorkTag} from "./workTags"
 
 export class FiberNode {
 	type: Type
@@ -22,7 +23,7 @@ export class FiberNode {
 
 	flags: Flags
 	subFlags: Flags
-	updateQueue: any
+	updateQueue: UpdateQueue<any> | null
 
 	constructor(tag: WorkTag, pendingProps: Props, key: Key) {
 		this.type = null
@@ -61,4 +62,19 @@ export class FiberRootNode {
 
 		this.finishedWork = null
 	}
+}
+
+export function createFiberFromElement(element: ReactElementType) {
+	const {type, key, props} = element
+	let fiberWorkTag: WorkTag = FunctionComponent
+	if (typeof type === "string") {
+		fiberWorkTag = HostComponent
+	} else if (typeof type !== "function") {
+		console.error('')
+	}
+
+	const fiber = new FiberNode(fiberWorkTag, props, key)
+	fiber.type = type
+
+	return fiber
 }
