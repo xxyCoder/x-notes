@@ -4,10 +4,11 @@ import {createUpdate, createUpdateQueue, enqueueUpdate} from "./updateQueue"
 import { scheduleUpdateOnFiber } from "./workLoop"
 import {HostRoot} from "./workTags"
 
-export function createContainer(container: Element) {
+ export function createContainer(container: Element) {
 	const hostRootFiber = new FiberNode(HostRoot, {}, null)
+	// 统一的根fiber
 	const root = new FiberRootNode(container, hostRootFiber)
-	hostRootFiber.updateQueue = createUpdateQueue()
+	hostRootFiber.updateQueue = createUpdateQueue<ReactElementType>()
 
 	return root
 }
@@ -19,7 +20,7 @@ export function updateContainer(
 	const hostRootFiber = root.current
 	const update = createUpdate<ReactElementType>(element)
 
-	enqueueUpdate(hostRootFiber.updateQueue, update)
+	enqueueUpdate<ReactElementType>(hostRootFiber.updateQueue, update)
 	scheduleUpdateOnFiber(hostRootFiber)
 
 	return element

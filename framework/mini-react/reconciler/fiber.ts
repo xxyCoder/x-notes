@@ -51,6 +51,7 @@ export class FiberNode {
 export class FiberRootNode {
 	containerInfo: Element
 	current: FiberNode
+	// 指向最新的host root fiber
 	finishedWork: FiberNode | null
 
 	constructor(container: Element, hostRootFiber: FiberNode) {
