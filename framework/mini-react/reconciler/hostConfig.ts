@@ -9,4 +9,8 @@ export function createTextInstance(txt: Props["content"]) {
 	return document.createTextNode(String(txt))
 }
 
-export function appendInitialChild(parent: Element, dom: any) {}
+export function appendInitialChild(parent: Element, child: Element) {
+	parent.appendChild(child)
+}
+
+export const appendChildToContainer = appendInitialChild

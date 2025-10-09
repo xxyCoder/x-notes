@@ -1,8 +1,9 @@
 import {Props} from "../shared/ReactTypes"
 import beginWork from "./beginWork"
+import { commitMutationEffects } from "./commitWork"
 import completeWork from "./completeWork"
 import {FiberNode, FiberRootNode} from "./fiber"
-import {NoFlags} from "./fiberFlags"
+import {MutationMask, NoFlags} from "./fiberFlags"
 import {HostRoot} from "./workTags"
 
 let workInProgress: FiberNode | null = null
@@ -34,25 +35,46 @@ function prepareFreshStack(fiber: FiberRootNode) {
 
 function renderRoot(root: FiberRootNode) {
 	prepareFreshStack(root)
-  do {
-    try {
-      workLoop()
+	do {
+		try {
+			workLoop()
 			break
-    } catch (err) {
-      workInProgress = null
-    }
-  } while(true)
+		} catch (err) {
+			workInProgress = null
+		}
+	} while (true)
 	const finishedWork = root.current.alternate
 	root.finishedWork = finishedWork
 
-	// commitRoot(root)
+	commitRoot(root)
+}
+
+function commitRoot(root: FiberRootNode) {
+	const finishedWork = root.finishedWork
+	if (finishedWork === null) {
+		return
+	}
+	root.finishedWork = null
+
+	// beforeMutation
+
+	// mutation
+	const subTreeHasFlags = (finishedWork.subFlags & MutationMask) !== NoFlags
+	const rootHasFlags = (finishedWork.flags & MutationMask) !== NoFlags
+	if (subTreeHasFlags || rootHasFlags) {
+		commitMutationEffects(finishedWork)
+		root.current = finishedWork
+	} else {
+		root.current = finishedWork
+	}
+
+	// layout
 }
 
 function workLoop() {
-  while (workInProgress !== null) {
+	while (workInProgress !== null) {
 		performUnitOfWork(workInProgress)
 	}
-	
 }
 
 function performUnitOfWork(fiber: FiberNode) {
@@ -78,7 +100,7 @@ function completeUnitOfWork(fiber: FiberNode) {
 		node = node.return
 		workInProgress = node
 	} while (node !== null)
-} 
+}
 
 function createWorkInProgress(current: FiberNode, pendingProps: Props) {
 	let wip = current.alternate
