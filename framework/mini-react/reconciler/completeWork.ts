@@ -5,7 +5,7 @@ import {
 	createInstance,
 	createTextInstance,
 } from "./hostConfig"
-import {HostComponent, HostRoot, HostText} from "./workTags"
+import {FunctionComponent, HostComponent, HostRoot, HostText} from "./workTags"
 
 export default function completeWork(fiber: FiberNode) {
 	const {pendingProps, alternate: current} = fiber
@@ -16,6 +16,7 @@ export default function completeWork(fiber: FiberNode) {
 	 */
 	switch (fiber.tag) {
 		case HostRoot:
+			bubbleProperties(fiber)
 			return
 		case HostComponent:
 			if (current !== null && fiber.stateNode) {
@@ -35,6 +36,9 @@ export default function completeWork(fiber: FiberNode) {
 				fiber.stateNode = instance
 			}
 			bubbleProperties(fiber)
+		case FunctionComponent:
+			bubbleProperties(fiber)
+			return
 		default:
 	}
 }

@@ -1,7 +1,7 @@
-import {Key, Props, ReactElementType, Ref, SingleChildren, Type} from "../shared/ReactTypes"
+import {Key, Props, ReactElementType, Ref, Type} from "../shared/ReactTypes"
 import {Flags, NoFlags} from "./fiberFlags"
 import {UpdateQueue} from "./updateQueue"
-import {FunctionComponent, HostComponent, HostText, WorkTag} from "./workTags"
+import {FunctionComponent, HostComponent, WorkTag} from "./workTags"
 
 export class FiberNode {
 	type: Type

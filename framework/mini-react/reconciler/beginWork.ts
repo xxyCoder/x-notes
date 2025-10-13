@@ -1,8 +1,9 @@
 import {Props} from "../shared/ReactTypes"
 import {mountChildrenFibers, reconcilerChildFibers} from "./childFibers"
 import {FiberNode} from "./fiber"
+import { renderWithHooks } from "./fiberHooks"
 import {processUpdate} from "./updateQueue"
-import {HostComponent, HostRoot, HostText} from "./workTags"
+import {FunctionComponent, HostComponent, HostRoot, HostText} from "./workTags"
 
 // 处理子节点，为其创建fiber
 export default function beginWork(fiber: FiberNode) {
@@ -14,10 +15,19 @@ export default function beginWork(fiber: FiberNode) {
 		case HostText:
 			// text没有子节点
 			return null
+		case FunctionComponent:
+			return updateFunctionComponent(fiber)
 		default:
 			console.log("none")
       return null
 	}
+}
+
+function updateFunctionComponent(fiber: FiberNode) {
+	const nextChildren = renderWithHooks(fiber)
+
+	reconcilerChildren(fiber, nextChildren)
+	return fiber.child
 }
 
 function updateHostRoot(fiber: FiberNode) {

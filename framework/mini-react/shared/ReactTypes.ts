@@ -5,7 +5,8 @@ export type Props = {
 	children?: SingleChildren | SingleChildren[]
 	content?: string | number
 }
-export type Type = string | ((props?: Props) => ReactElementType) | null
+export type TypeFunc = ((props?: Props) => ReactElementType)
+export type Type = string | TypeFunc | null
 export type Action<State> = State | ((prevState: State) => State)
 
 export interface ReactElementType {
