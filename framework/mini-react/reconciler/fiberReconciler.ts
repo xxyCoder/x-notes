@@ -20,7 +20,7 @@ export function updateContainer(
 	const hostRootFiber = root.current
 	const update = createUpdate<ReactElementType>(element)
 
-	enqueueUpdate<ReactElementType>(hostRootFiber.updateQueue, update)
+	enqueueUpdate<ReactElementType>(hostRootFiber.updateQueue!, update)
 	scheduleUpdateOnFiber(hostRootFiber)
 
 	return element
