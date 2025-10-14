@@ -3,6 +3,10 @@ import {Flags, NoFlags} from "./fiberFlags"
 import {UpdateQueue} from "./updateQueue"
 import {FunctionComponent, HostComponent, WorkTag} from "./workTags"
 
+/**
+ * react element从数据类型来看，只是一个dom节点的快照，没有包含组件实例状态、组件直接关系等信息
+ * fiber是一个动态的工作单元
+ */
 export class FiberNode {
 	type: Type
 	key: Key
@@ -49,12 +53,18 @@ export class FiberNode {
 	}
 }
 
+/**
+ * 整个应用的入口控制器，双缓冲树的管理者
+ * @param containerInfo 实际的DOM元素，如div#root
+ * @param current 在当前屏幕显示的树
+ * @param finishedWork 已完成的workInProgress树
+ */
 export class FiberRootNode {
 	containerInfo: Element
 	current: FiberNode
-	// 指向最新的host root fiber
 	finishedWork: FiberNode | null
 
+	// host root fiber定义了react fiber的边界，作为整个fiber树的起点
 	constructor(container: Element, hostRootFiber: FiberNode) {
 		this.containerInfo = container
 		this.current = hostRootFiber
