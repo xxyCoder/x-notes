@@ -62,11 +62,11 @@ function mountState<T>(initialState: T | (() => T)): [T, Dispatch<T>] {
 
 function dispatchSetState<State>(
 	fiber: FiberNode,
-	updateQueue: UpdateQueue<Action<State>>,
+	updateQueue: UpdateQueue<State>,
 	action: Action<State>
 ) {
 	const update = createUpdate(action)
-	enqueueUpdate(updateQueue, update)
+	enqueueUpdate<State>(updateQueue, update)
 	scheduleUpdateOnFiber(fiber)
 }
 

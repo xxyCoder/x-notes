@@ -1,8 +1,8 @@
 import {Props} from "../shared/ReactTypes"
 import {mountChildrenFibers, reconcilerChildFibers} from "./childFibers"
 import {FiberNode} from "./fiber"
-import { renderWithHooks } from "./fiberHooks"
-import {processUpdate} from "./updateQueue"
+import {renderWithHooks} from "./fiberHooks"
+import {processUpdateQueue} from "./updateQueue"
 import {FunctionComponent, HostComponent, HostRoot, HostText} from "./workTags"
 
 // 处理子节点，为其创建fiber
@@ -19,7 +19,7 @@ export default function beginWork(fiber: FiberNode) {
 			return updateFunctionComponent(fiber)
 		default:
 			console.log("none")
-      return null
+			return null
 	}
 }
 
@@ -32,12 +32,11 @@ function updateFunctionComponent(fiber: FiberNode) {
 
 function updateHostRoot(fiber: FiberNode) {
 	const {memoizedState: baseState, updateQueue} = fiber
-	const pending = updateQueue?.shared.pending || null
 	if (updateQueue) {
 		updateQueue.shared.pending = null
 	}
 	// 对于host root fiber来说，就是<App /> element
-	const {memoizedState} = processUpdate(baseState, pending)
+	const {memoizedState} = processUpdateQueue(baseState, updateQueue)
 	fiber.memoizedState = memoizedState
 
 	const nextChildren = memoizedState
