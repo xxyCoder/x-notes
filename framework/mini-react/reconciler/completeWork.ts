@@ -7,11 +7,13 @@ import {
 } from "./hostConfig"
 import {FunctionComponent, HostComponent, HostRoot, HostText} from "./workTags"
 
+
+// complete work是自底向上的，先建立了子dom，就方便在父dom中调用append方法
 export default function completeWork(fiber: FiberNode) {
 	const {pendingProps, alternate: current} = fiber
 	/**
 	 * 1. 构建dom
-	 * 2. 加入父dom
+	 * 2. 将子dom加入到当前dom
 	 */
 	switch (fiber.tag) {
 		case HostRoot:
