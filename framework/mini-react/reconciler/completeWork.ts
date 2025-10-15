@@ -9,7 +9,6 @@ import {FunctionComponent, HostComponent, HostRoot, HostText} from "./workTags"
 
 export default function completeWork(fiber: FiberNode) {
 	const {pendingProps, alternate: current} = fiber
-
 	/**
 	 * 1. 构建dom
 	 * 2. 加入父dom

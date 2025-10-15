@@ -33,6 +33,7 @@ export function renderWithHooks(fiber: FiberNode) {
 		currentDispatcher.current = HookDispatcherOnMount
 	}
 
+	// 函数存储在react element的type中，也就是fiber的type
 	const Component = fiber.type as TypeFunc
 	const props = fiber.pendingProps
 	const child = Component(props)

@@ -31,6 +31,7 @@ function markUpdateFromFiberToRoot(fiber: FiberNode) {
 }
 
 function prepareFreshStack(fiber: FiberRootNode) {
+	// 拿到的是host fiber，也就是说workInProgress最开始被赋值为host fiber（fiber的起点）
 	workInProgress = createWorkInProgress(fiber.current, {})
 }
 
@@ -93,6 +94,7 @@ function completeUnitOfWork(fiber: FiberNode) {
 	let node: FiberNode | null = fiber
 	do {
 		completeWork(node)
+		// 寻找下一个子节点
 		const sibling = node.sibling
 		if (sibling !== null) {
 			workInProgress = sibling
