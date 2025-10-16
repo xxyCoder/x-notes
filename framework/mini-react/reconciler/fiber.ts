@@ -29,6 +29,8 @@ export class FiberNode {
 	subFlags: Flags
 	updateQueue: UpdateQueue<any> | null
 
+	deletions: FiberNode[] | null
+
 	constructor(tag: WorkTag, pendingProps: Props, key: Key) {
 		this.type = null
 		this.key = key
@@ -50,6 +52,8 @@ export class FiberNode {
 		this.subFlags = NoFlags
 
 		this.updateQueue = null
+
+		this.deletions = null
 	}
 }
 

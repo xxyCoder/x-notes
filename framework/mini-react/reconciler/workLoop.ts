@@ -103,7 +103,7 @@ function completeUnitOfWork(fiber: FiberNode) {
 	} while (node !== null)
 }
 
-function createWorkInProgress(current: FiberNode, pendingProps: Props) {
+export function createWorkInProgress(current: FiberNode, pendingProps: Props) {
 	let wip = current.alternate
 
 	if (wip === null) {
