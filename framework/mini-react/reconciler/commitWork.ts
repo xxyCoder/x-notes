@@ -1,7 +1,13 @@
 import {FiberNode} from "./fiber"
-import {MutationMask, NoFlags, Placement} from "./fiberFlags"
-import {appendChildToContainer} from "./hostConfig"
-import {HostComponent, HostRoot, HostText} from "./workTags"
+import {
+	ChildDeletion,
+	MutationMask,
+	NoFlags,
+	Placement,
+	Update,
+} from "./fiberFlags"
+import {appendChildToContainer, commitUpdate, removeChild} from "./hostConfig"
+import {FunctionComponent, HostComponent, HostRoot, HostText} from "./workTags"
 
 let nextEffect: FiberNode | null = null
 // 从底部往上处理effect
@@ -13,7 +19,7 @@ export const commitMutationEffects = (finishedWork: FiberNode) => {
 		const child = nextEffect.child
 		if ((nextEffect.subFlags & MutationMask) !== NoFlags && child !== null) {
 			nextEffect = child
-		} else { 
+		} else {
 			up: while (nextEffect !== null) {
 				commitMutationEffectsOnFiber(nextEffect)
 				const sibling = nextEffect.sibling
@@ -33,14 +39,80 @@ function commitMutationEffectsOnFiber(finishedWork: FiberNode) {
 		commitPlacement(finishedWork)
 		finishedWork.flags &= ~Placement
 	}
+	if ((flags & Update) !== NoFlags) {
+		commitUpdate(finishedWork)
+		finishedWork.flags &= ~Update
+	}
+	if ((flags & ChildDeletion) !== NoFlags) {
+		const deletions = finishedWork.deletions ?? []
+		deletions.forEach((fiber) => commitDeletion(fiber))
+		finishedWork.flags &= ~ChildDeletion
+	}
+}
+
+function commitDeletion(fiber: FiberNode) {
+	let rootHostNode: FiberNode | null = null
+	commitNestedComponent(fiber, (unmountFiber) => {
+		switch (unmountFiber.tag) {
+			case HostComponent:
+				if (rootHostNode === null) {
+					rootHostNode = unmountFiber
+				}
+				// TODO: 解绑ref
+				return
+			case HostText:
+				if (rootHostNode === null) {
+					rootHostNode = unmountFiber
+				}
+				return
+			case FunctionComponent:
+				// useEffect unmount
+				return
+		}
+	})
+
+	if (rootHostNode !== null) {
+		 const hostParent = getHostParent(rootHostNode)
+		 if (!!hostParent) {
+			removeChild(rootHostNode, hostParent)
+		 }
+	}
+	fiber.return = null
+	fiber.child = null
+}
+
+function commitNestedComponent(
+	root: FiberNode,
+	onCommitUnmount: (fiber: FiberNode) => void
+) {
+	let node = root
+	while (true) {
+		onCommitUnmount(node)
+		if (node.child !== null) {
+			node.child.return = node
+			node.child = node
+			continue
+		}
+		if (node === root) {
+			return
+		}
+		while (node.sibling === null) {
+			if (node.return === null || node.return === root) {
+				return
+			}
+			node = node.return
+		}
+		node.sibling.return = node.return
+		node = node.sibling
+	}
 }
 
 function commitPlacement(finishedWork: FiberNode) {
 	// 需要找到最近的有真实dom的fiber，也就是tag为host component或者是host root（容器）
 	const parent = getHostParent(finishedWork)
-  if (parent) {
-    appendPlacementNodeIntoContainer(finishedWork, parent)
-  }
+	if (parent) {
+		appendPlacementNodeIntoContainer(finishedWork, parent)
+	}
 }
 
 function getHostParent(fiber: FiberNode) {
@@ -71,7 +143,7 @@ function appendPlacementNodeIntoContainer(
 		let sibling = finishedWork.sibling
 		while (sibling !== null) {
 			appendPlacementNodeIntoContainer(sibling, hostParent)
-      sibling = sibling.sibling
+			sibling = sibling.sibling
 		}
 	}
 }
