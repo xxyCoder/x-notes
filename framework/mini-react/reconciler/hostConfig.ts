@@ -1,5 +1,4 @@
 import {Props} from "../shared/ReactTypes"
-import {FiberNode} from "./fiber"
 
 export function createInstance(type: string, pendingProps: Props) {
 	return document.createElement(type)

@@ -1,6 +1,6 @@
 import {Props} from "../shared/ReactTypes"
 import beginWork from "./beginWork"
-import { commitMutationEffects } from "./commitWork"
+import {commitMutationEffects} from "./commitWork"
 import completeWork from "./completeWork"
 import {FiberNode, FiberRootNode} from "./fiber"
 import {MutationMask, NoFlags} from "./fiberFlags"
@@ -58,19 +58,17 @@ function commitRoot(root: FiberRootNode) {
 	}
 	root.finishedWork = null
 
-	// beforeMutation
-
-	// mutation
 	const subTreeHasFlags = (finishedWork.subFlags & MutationMask) !== NoFlags
 	const rootHasFlags = (finishedWork.flags & MutationMask) !== NoFlags
 	if (subTreeHasFlags || rootHasFlags) {
+		// beforeMutation
+		// mutation
 		commitMutationEffects(finishedWork)
 		root.current = finishedWork
+		// layout
 	} else {
 		root.current = finishedWork
 	}
-
-	// layout
 }
 
 function workLoop() {

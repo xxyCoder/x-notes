@@ -4,14 +4,16 @@ import {appendChildToContainer} from "./hostConfig"
 import {HostComponent, HostRoot, HostText} from "./workTags"
 
 let nextEffect: FiberNode | null = null
+// 从底部往上处理effect
 export const commitMutationEffects = (finishedWork: FiberNode) => {
+	// finishedWork = host fiber
 	nextEffect = finishedWork
 
 	while (nextEffect !== null) {
 		const child = nextEffect.child
 		if ((nextEffect.subFlags & MutationMask) !== NoFlags && child !== null) {
 			nextEffect = child
-		} else {
+		} else { 
 			up: while (nextEffect !== null) {
 				commitMutationEffectsOnFiber(nextEffect)
 				const sibling = nextEffect.sibling
@@ -34,6 +36,7 @@ function commitMutationEffectsOnFiber(finishedWork: FiberNode) {
 }
 
 function commitPlacement(finishedWork: FiberNode) {
+	// 需要找到最近的有真实dom的fiber，也就是tag为host component或者是host root（容器）
 	const parent = getHostParent(finishedWork)
   if (parent) {
     appendPlacementNodeIntoContainer(finishedWork, parent)
@@ -63,6 +66,7 @@ function appendPlacementNodeIntoContainer(
 	}
 	const child = finishedWork.child
 	if (child !== null) {
+		// 递归找到有真实dom的fiber，比如当前fiber tag为function component
 		appendPlacementNodeIntoContainer(child, hostParent)
 		let sibling = finishedWork.sibling
 		while (sibling !== null) {
