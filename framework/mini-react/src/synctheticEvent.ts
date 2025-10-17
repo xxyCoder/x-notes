@@ -28,11 +28,11 @@ function dispatchEvent(container: Element, eventType: string, event: Event) {
 	// 1. 收集沿途的事件
 	const {capture, bubble} = collectPaths(targetElement, container, eventType)
 	// 2. 构造合成事件
-	const synctheticEvent = createSynctheticEvent(event)
+	const syntheticEvent = createSyntheticEvent(event)
 	// 3. 遍历capture、bubble
-	triggerEventFlow(capture, synctheticEvent)
-	if (!synctheticEvent.__stopPropagation) {
-		triggerEventFlow(bubble, synctheticEvent)
+	triggerEventFlow(capture, syntheticEvent)
+	if (!syntheticEvent.__stopPropagation) {
+		triggerEventFlow(bubble, syntheticEvent)
 	}
 }
 
@@ -77,29 +77,29 @@ function collectPaths(
 }
 
 // 之所以要创建合成事件，是因为capture和bubble阶段都是模拟的，那么stopPropagation等方法也需要模拟实现
-interface SynctheticEvent extends Event {
+interface SyntheticEvent extends Event {
 	__stopPropagation: boolean
 }
-function createSynctheticEvent(event: Event) {
-	const synctheticEvent = event as SynctheticEvent
-	synctheticEvent.__stopPropagation = false
+function createSyntheticEvent(event: Event) {
+	const syntheticEvent = event as SyntheticEvent
+	syntheticEvent.__stopPropagation = false
 	const originStopPropagation = event.stopPropagation
-	synctheticEvent.stopPropagation = () => {
-		synctheticEvent.__stopPropagation = true
+	syntheticEvent.stopPropagation = () => {
+		syntheticEvent.__stopPropagation = true
 		originStopPropagation?.()
 	}
 
-	return synctheticEvent
+	return syntheticEvent
 }
 
 function triggerEventFlow(
 	cbs: EventCallback[],
-	synctheticEvent: SynctheticEvent
+	syntheticEvent: SyntheticEvent
 ) {
 	for (let i = 0; i < cbs.length; ++i) {
 		const cb = cbs[i]
-		cb.call(null, synctheticEvent)
-		if (synctheticEvent.__stopPropagation) {
+		cb.call(null, syntheticEvent)
+		if (syntheticEvent.__stopPropagation) {
 			break
 		}
 	}
