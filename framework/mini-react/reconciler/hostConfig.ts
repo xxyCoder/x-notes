@@ -1,9 +1,12 @@
 import {Props} from "../shared/ReactTypes"
+import {DOMElement, updateFiberProps} from "../src/synctheticEvent"
 import {FiberNode} from "./fiber"
-import {HostText} from "./workTags"
+import {HostComponent, HostText} from "./workTags"
 
 export function createInstance(type: string, pendingProps: Props) {
-	return document.createElement(type)
+	const element = document.createElement(type) as unknown as DOMElement
+	updateFiberProps(element, pendingProps)
+	return element
 }
 
 export function createTextInstance(txt: Props["content"]) {
@@ -21,6 +24,8 @@ export function commitUpdate(fiber: FiberNode) {
 		case HostText:
 			const text = fiber.pendingProps.content as string
 			commitTextUpdate(fiber.stateNode as Text, text)
+			break
+		case HostComponent:
 			break
 	}
 }

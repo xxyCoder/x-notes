@@ -1,4 +1,5 @@
 import { ReactElementType } from "../shared/ReactTypes"
+import { initEvent } from "../src/synctheticEvent"
 import { createContainer, updateContainer } from "./fiberReconciler"
 
 export function createRoot(container: Element) {
@@ -6,6 +7,7 @@ export function createRoot(container: Element) {
 
   return {
     render(element: ReactElementType) {
+      initEvent(container, 'click')
       updateContainer(element, root)
     }
   }
