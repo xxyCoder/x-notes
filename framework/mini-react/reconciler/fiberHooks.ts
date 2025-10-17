@@ -6,12 +6,14 @@ import {
 	createUpdate,
 	createUpdateQueue,
 	enqueueUpdate,
+	processUpdateQueue,
 	UpdateQueue,
 } from "./updateQueue"
 import {scheduleUpdateOnFiber} from "./workLoop"
 
 let currentlyRenderingFiber: FiberNode | null = null
 let workInProgressHook: Hook | null = null
+let currentHook: Hook | null = null
 
 const {currentDispatcher} = internals
 
@@ -28,6 +30,7 @@ export function renderWithHooks(fiber: FiberNode) {
 	const current = fiber.alternate
 	if (current !== null) {
 		// update
+		currentDispatcher.current = HookDispatcherOnUpdate
 	} else {
 		// mount
 		currentDispatcher.current = HookDispatcherOnMount
@@ -40,10 +43,6 @@ export function renderWithHooks(fiber: FiberNode) {
 
 	currentlyRenderingFiber = null
 	return child
-}
-
-const HookDispatcherOnMount: Dispatcher = {
-	useState: mountState,
 }
 
 function mountState<T>(initialState: T | (() => T)): [T, Dispatch<T>] {
@@ -59,16 +58,6 @@ function mountState<T>(initialState: T | (() => T)): [T, Dispatch<T>] {
 	queue.dispatch = dispatch
 
 	return [memoizedState, dispatch]
-}
-
-function dispatchSetState<State>(
-	fiber: FiberNode,
-	updateQueue: UpdateQueue<State>,
-	action: Action<State>
-) {
-	const update = createUpdate(action)
-	enqueueUpdate<State>(updateQueue, update)
-	scheduleUpdateOnFiber(fiber)
 }
 
 function mountWorkInProgressHook() {
@@ -92,4 +81,69 @@ function mountWorkInProgressHook() {
 	}
 
 	return hook
+}
+
+const HookDispatcherOnMount: Dispatcher = {
+	useState: mountState,
+}
+
+function updateState<T>(): [T, Dispatch<T>] {
+	const hook = updateWorkInProgress()
+	const updateQueue = hook.updateQueue as UpdateQueue<T>
+	const {memoizedState} = processUpdateQueue(hook.memoizedState, updateQueue)
+	hook.memoizedState = memoizedState
+
+	return [memoizedState, updateQueue.dispatch!]
+}
+
+function updateWorkInProgress() {
+	let hook: Hook | null = null
+	if (currentHook === null) {
+		// 说明是第一个hook
+		const current = currentlyRenderingFiber?.alternate
+		hook = current?.memoizedState ?? null
+	} else {
+		// 后续hook
+		hook = currentHook.next
+	}
+
+	if (hook === null) {
+		// mount/update u1 u2 u3 null
+		// update       u1 u2 u3 u4
+		throw new Error("hook 必须在函数顶层调用")
+	}
+	currentHook = hook
+	const newHook: Hook = {
+		memoizedState: hook.memoizedState,
+		updateQueue: hook.updateQueue,
+		next: null,
+	}
+
+	if (workInProgressHook === null) {
+		// 说明是第一个hook
+		if (currentlyRenderingFiber === null) {
+			throw new Error("没有在函数中调用hook")
+		}
+		workInProgressHook = newHook
+		currentlyRenderingFiber.memoizedState = workInProgressHook
+	} else {
+		// 后续hook
+		workInProgressHook.next = newHook
+		workInProgressHook = newHook
+	}
+	return newHook
+}
+
+const HookDispatcherOnUpdate: Dispatcher = {
+	useState: updateState,
+}
+
+function dispatchSetState<State>(
+	fiber: FiberNode,
+	updateQueue: UpdateQueue<State>,
+	action: Action<State>
+) {
+	const update = createUpdate(action)
+	enqueueUpdate<State>(updateQueue, update)
+	scheduleUpdateOnFiber(fiber)
 }
