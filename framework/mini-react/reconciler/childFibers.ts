@@ -29,21 +29,40 @@ function childrenReconciler(shouldTrackEffect: boolean) {
 		returnFiber.flags |= ChildDeletion
 	}
 
+	function deleteRemainChild(
+		returnFiber: FiberNode,
+		currentFiber: FiberNode | null
+	) {
+		if (!shouldTrackEffect) {
+			return
+		}
+		let childToDelete = currentFiber
+		while (childToDelete !== null) {
+			deleteChild(returnFiber, childToDelete)
+			childToDelete = childToDelete.sibling 
+		}
+	}
+
+	// mount/update后是单节点
 	function reconcilerSingleElement(
 		returnFiber: FiberNode,
 		currentFiber: FiberNode | null,
 		newChild: ReactElementType
 	) {
 		const key = newChild.key
-		if (currentFiber !== null) {
+		while (currentFiber !== null) {
 			// update
 			if (currentFiber.key === key && currentFiber.type === newChild.type) {
 				const existing = useFiber(currentFiber, newChild.props)
 				existing.return = returnFiber
+				// eg: A1 B1 C1 -> B1
+				deleteRemainChild(returnFiber, currentFiber.sibling)
 				return existing
 			} else {
 				// 删除旧element，走到和mount阶段一样的流程
 				deleteChild(returnFiber, currentFiber)
+				// eg: A1 B1 C1 -> B2 or A1 B1 C1 -> D1
+				currentFiber = currentFiber.sibling
 			}
 		}
 		// mount
@@ -59,15 +78,16 @@ function childrenReconciler(shouldTrackEffect: boolean) {
 		currentFiber: FiberNode | null,
 		content: string | number
 	) {
-		if (currentFiber !== null) {
+		while (currentFiber !== null) {
 			if (currentFiber.tag === HostText) {
 				// 说明类型都是文本，文本不需要判断key（因为没有）
 				const existing = useFiber(currentFiber, {content})
 				existing.return = returnFiber
-
+				deleteRemainChild(returnFiber, currentFiber.sibling)
 				return existing
 			} else {
 				deleteChild(returnFiber, currentFiber)
+				currentFiber = currentFiber.sibling
 			}
 		}
 		// 其实pendingProps就是一个字符串，这里方便ts定义改成{ content: 'xxxx' }
