@@ -19,6 +19,14 @@ export function appendInitialChild(parent: Element, child: Element) {
 
 export const appendChildToContainer = appendInitialChild
 
+export function insertChildToContainer(
+	parent: Element,
+	before: Element,
+	after: Element
+) {
+	parent.insertBefore(after, before)
+}
+
 export function commitUpdate(fiber: FiberNode) {
 	switch (fiber.tag) {
 		case HostText:

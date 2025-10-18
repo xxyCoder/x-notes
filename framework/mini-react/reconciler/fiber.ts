@@ -12,6 +12,7 @@ export class FiberNode {
 	key: Key
 	ref: Ref
 	tag: WorkTag
+	index: number
 
 	stateNode: any
 
@@ -36,6 +37,7 @@ export class FiberNode {
 		this.key = key
 		this.ref = null
 		this.tag = tag
+		this.index = 0
 
 		this.stateNode = null
 

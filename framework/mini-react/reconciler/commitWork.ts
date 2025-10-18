@@ -6,7 +6,12 @@ import {
 	Placement,
 	Update,
 } from "./fiberFlags"
-import {appendChildToContainer, commitUpdate, removeChild} from "./hostConfig"
+import {
+	appendChildToContainer,
+	commitUpdate,
+	insertChildToContainer,
+	removeChild,
+} from "./hostConfig"
 import {FunctionComponent, HostComponent, HostRoot, HostText} from "./workTags"
 
 let nextEffect: FiberNode | null = null
@@ -110,8 +115,47 @@ function commitNestedComponent(
 function commitPlacement(finishedWork: FiberNode) {
 	// 需要找到最近的有真实dom的fiber，也就是tag为host component或者是host root（容器）
 	const parent = getHostParent(finishedWork)
-	if (parent) {
-		appendPlacementNodeIntoContainer(finishedWork, parent)
+	const sibling = getHostSibling(finishedWork)
+	if (parent !== null) {
+		insertOrAppendPlacementNodeIntoContainer(finishedWork, parent, sibling)
+	}
+}
+/**
+ * <App> <div />
+ *  App: <span />
+ * 最终变成 <span /> <div />
+ */
+function getHostSibling(fiber: FiberNode) {
+	let node = fiber
+	findSibling: while (true) {
+		while (node.sibling === null) {
+			const parent = node.return
+			if (
+				parent === null ||
+				parent.tag === HostComponent ||
+				parent.tag === HostRoot
+			) {
+				return null
+			}
+			node = parent
+		}
+		node.sibling.return = node.return
+		node = node.sibling
+		while (![HostComponent, HostText].includes(node.tag)) {
+			// 向下遍历找host
+			// 排除Placement节点（被移动走了，不能作为host sibling)
+			if ((node.flags & Placement) !== NoFlags) {
+				continue findSibling
+			}
+			if (node.child === null) {
+				continue findSibling
+			}
+			node.child.return = node.child
+			node = node.child
+		}
+		if ((node.flags & Placement) === NoFlags) {
+			return node.stateNode
+		}
 	}
 }
 
@@ -127,22 +171,28 @@ function getHostParent(fiber: FiberNode) {
 		}
 		parent = parent.return
 	}
+	return null
 }
 
-function appendPlacementNodeIntoContainer(
+function insertOrAppendPlacementNodeIntoContainer(
 	finishedWork: FiberNode,
-	hostParent: Element
+	hostParent: Element,
+	before?: Element
 ) {
 	if (finishedWork.tag === HostComponent || finishedWork.tag === HostText) {
-		appendChildToContainer(hostParent, finishedWork.stateNode)
+		if (typeof before !== "undefined") {
+			insertChildToContainer(hostParent, before, finishedWork.stateNode)
+		} else {
+			appendChildToContainer(hostParent, finishedWork.stateNode)
+		}
 	}
 	const child = finishedWork.child
 	if (child !== null) {
 		// 递归找到有真实dom的fiber，比如当前fiber tag为function component
-		appendPlacementNodeIntoContainer(child, hostParent)
+		insertOrAppendPlacementNodeIntoContainer(child, hostParent)
 		let sibling = finishedWork.sibling
 		while (sibling !== null) {
-			appendPlacementNodeIntoContainer(sibling, hostParent)
+			insertOrAppendPlacementNodeIntoContainer(sibling, hostParent)
 			sibling = sibling.sibling
 		}
 	}
