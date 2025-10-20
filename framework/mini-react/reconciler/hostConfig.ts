@@ -1,6 +1,7 @@
 import {Props} from "../shared/ReactTypes"
 import {DOMElement, updateFiberProps} from "../src/synctheticEvent"
 import {FiberNode} from "./fiber"
+import {Callback} from "./syncTaskQueue"
 import {HostComponent, HostText} from "./workTags"
 
 export function createInstance(type: string, pendingProps: Props) {
@@ -45,3 +46,10 @@ export function commitTextUpdate(textInstance: Text, content: string) {
 export function removeChild(child: Element, container: Element) {
 	container.removeChild(child)
 }
+
+export const scheduleMicroTask =
+	typeof queueMicrotask === "function"
+		? queueMicrotask
+		: typeof Promise === "function"
+		? (cb: Callback) => Promise.resolve(null).then(() => cb())
+		: setTimeout

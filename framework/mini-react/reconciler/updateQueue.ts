@@ -1,15 +1,21 @@
 import {Action} from "../shared/ReactTypes"
 import {Dispatch} from "../src/currentDispatcher"
+import {Lanes} from "./fiberLanes"
 
 // 表示一个更新操作，要么给一个更新值，要么给一个更新函数（需要传递旧值，返回新值）
 export interface Update<State> {
 	action: Action<State>
-	next: Update<State> | null
+	lanes: Lanes
+	next: Update<any> | null
 }
 
-export const createUpdate = <State>(action: Action<State>): Update<State> => {
+export const createUpdate = <State>(
+	action: Action<State>,
+	lanes: Lanes
+): Update<State> => {
 	return {
 		action,
+		lanes,
 		next: null,
 	}
 }
@@ -42,7 +48,16 @@ export const enqueueUpdate = <State>(
 	updateQueue: UpdateQueue<State>,
 	update: Update<State>
 ) => {
-	update.next = updateQueue.shared.pending
+	const pending = updateQueue.shared.pending
+	if (pending === null) {
+		// 指向自己形成环状链表
+		update.next = update
+	} else {
+		// abc => c -> a -> b -> c
+		update.next = pending.next
+		pending.next = update
+	}
+	// pending始终指向最后插入的update，那么pending.next指向的就是第一个update
 	updateQueue.shared.pending = update
 }
 
@@ -53,18 +68,13 @@ export const processUpdateQueue = <State>(
 ) => {
 	const pending = updateQueue?.shared?.pending || null
 
-	if (pending === null) {
+	if (pending === null || pending.next === null) {
 		return {
 			memoizedState: baseState,
 		}
 	}
 
-	let first = pending
-	while (first.next !== pending && first.next !== null) {
-		first = first.next
-	}
-
-	let current = first
+	let current = pending.next
 	let newState = baseState
 
 	do {

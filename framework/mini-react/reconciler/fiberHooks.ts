@@ -2,6 +2,7 @@ import internals from "../shared/internals"
 import {Action, TypeFunc} from "../shared/ReactTypes"
 import {Dispatcher, Dispatch} from "../src/currentDispatcher"
 import {FiberNode} from "./fiber"
+import { requestUpdateLanes } from "./fiberLanes"
 import {
 	createUpdate,
 	createUpdateQueue,
@@ -143,7 +144,8 @@ function dispatchSetState<State>(
 	updateQueue: UpdateQueue<State>,
 	action: Action<State>
 ) {
-	const update = createUpdate(action)
+	const lanes = requestUpdateLanes()
+	const update = createUpdate(action, lanes)
 	enqueueUpdate<State>(updateQueue, update)
-	scheduleUpdateOnFiber(fiber)
+	scheduleUpdateOnFiber(fiber, lanes)
 }

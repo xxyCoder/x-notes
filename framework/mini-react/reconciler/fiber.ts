@@ -1,5 +1,6 @@
 import {Key, Props, ReactElementType, Ref, Type} from "../shared/ReactTypes"
 import {Flags, NoFlags} from "./fiberFlags"
+import {Lanes, NoLane} from "./fiberLanes"
 import {UpdateQueue} from "./updateQueue"
 import {FunctionComponent, HostComponent, WorkTag} from "./workTags"
 
@@ -69,6 +70,8 @@ export class FiberRootNode {
 	containerInfo: Element
 	current: FiberNode
 	finishedWork: FiberNode | null
+	pendingLanes: Lanes
+	finishedLanes: Lanes
 
 	// host root fiber定义了react fiber的边界，作为整个fiber树的起点
 	constructor(container: Element, hostRootFiber: FiberNode) {
@@ -77,6 +80,9 @@ export class FiberRootNode {
 		hostRootFiber.stateNode = this
 
 		this.finishedWork = null
+
+		this.pendingLanes = NoLane
+		this.finishedLanes = NoLane
 	}
 }
 
@@ -86,7 +92,7 @@ export function createFiberFromElement(element: ReactElementType) {
 	if (typeof type === "string") {
 		fiberWorkTag = HostComponent
 	} else if (typeof type !== "function") {
-		console.error('')
+		console.error("")
 	}
 
 	const fiber = new FiberNode(fiberWorkTag, props, key)
