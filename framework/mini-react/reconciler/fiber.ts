@@ -65,6 +65,8 @@ export class FiberNode {
  * @param containerInfo 实际的DOM元素，如div#root
  * @param current 在当前屏幕显示的树
  * @param finishedWork 已完成的workInProgress树
+ * @param pendingLanes 代表所有没有被“消费”的lane集合
+ * @param finishedLanes 代表本次更新的lane
  */
 export class FiberRootNode {
 	containerInfo: Element

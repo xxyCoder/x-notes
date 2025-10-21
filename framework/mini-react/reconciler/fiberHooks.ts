@@ -2,7 +2,7 @@ import internals from "../shared/internals"
 import {Action, TypeFunc} from "../shared/ReactTypes"
 import {Dispatcher, Dispatch} from "../src/currentDispatcher"
 import {FiberNode} from "./fiber"
-import { requestUpdateLanes } from "./fiberLanes"
+import {Lane, NoLane, requestUpdateLanes} from "./fiberLanes"
 import {
 	createUpdate,
 	createUpdateQueue,
@@ -15,6 +15,7 @@ import {scheduleUpdateOnFiber} from "./workLoop"
 let currentlyRenderingFiber: FiberNode | null = null
 let workInProgressHook: Hook | null = null
 let currentHook: Hook | null = null
+let currentRenderLane: Lane = NoLane
 
 const {currentDispatcher} = internals
 
@@ -24,9 +25,10 @@ interface Hook {
 	next: Hook | null
 }
 
-export function renderWithHooks(fiber: FiberNode) {
+export function renderWithHooks(fiber: FiberNode, renderLane: Lane) {
 	currentlyRenderingFiber = fiber
 	fiber.memoizedState = null
+	currentRenderLane = renderLane
 
 	const current = fiber.alternate
 	if (current !== null) {
@@ -43,6 +45,7 @@ export function renderWithHooks(fiber: FiberNode) {
 	const child = Component(props)
 
 	currentlyRenderingFiber = null
+	currentRenderLane = NoLane
 	return child
 }
 
@@ -91,7 +94,11 @@ const HookDispatcherOnMount: Dispatcher = {
 function updateState<T>(): [T, Dispatch<T>] {
 	const hook = updateWorkInProgress()
 	const updateQueue = hook.updateQueue as UpdateQueue<T>
-	const {memoizedState} = processUpdateQueue(hook.memoizedState, updateQueue)
+	const {memoizedState} = processUpdateQueue(
+		hook.memoizedState,
+		updateQueue.shared.pending,
+		currentRenderLane
+	)
 	hook.memoizedState = memoizedState
 
 	return [memoizedState, updateQueue.dispatch!]

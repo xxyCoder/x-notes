@@ -1,8 +1,11 @@
 import {Action} from "../shared/ReactTypes"
 import {Dispatch} from "../src/currentDispatcher"
-import {Lanes} from "./fiberLanes"
+import {Lane, Lanes} from "./fiberLanes"
 
-// 表示一个更新操作，要么给一个更新值，要么给一个更新函数（需要传递旧值，返回新值）
+/**
+ * action 表示一个更新操作，要么给一个更新值，要么给一个更新函数（需要传递旧值，返回新值）
+ * lanes 表示优先级
+ */
 export interface Update<State> {
 	action: Action<State>
 	lanes: Lanes
@@ -64,28 +67,27 @@ export const enqueueUpdate = <State>(
 // 根据初始状态 + 更新函数进行更新
 export const processUpdateQueue = <State>(
 	baseState: State,
-	updateQueue: UpdateQueue<State> | null
+	pendingUpdate: Update<State> | null,
+	renderLane: Lane
 ) => {
-	const pending = updateQueue?.shared?.pending || null
-
-	if (pending === null || pending.next === null) {
-		return {
-			memoizedState: baseState,
-		}
-	}
-
-	let current = pending.next
 	let newState = baseState
 
-	do {
-		const action = current.action
-		if (action instanceof Function) {
-			newState = action(newState) // 使用前一个state作为参数
-		} else {
-			newState = action // 直接使用新值
-		}
-		current = current.next!
-	} while (current !== pending.next && current !== null) // 遍历整个环形链表
+	if (pendingUpdate !== null) {
+		const first = pendingUpdate.next
+		let pending = pendingUpdate.next
+		do {
+			const lanes = pending!.lanes
+			if (lanes === renderLane) {
+				const action = pending!.action
+				if (action instanceof Function) {
+					newState = action(newState) // 使用前一个state作为参数
+				} else {
+					newState = action // 直接使用新值
+				}
+			}
+			pending = pending!.next
+		} while (pending !== first) // 遍历整个环形链表
+	}
 
 	return {
 		memoizedState: newState,

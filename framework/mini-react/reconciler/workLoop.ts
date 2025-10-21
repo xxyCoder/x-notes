@@ -8,6 +8,7 @@ import {
 	getHighestPriorityLane,
 	Lane,
 	Lanes,
+	markRootFinished,
 	mergeLanes,
 	NoLane,
 	SyncLane,
@@ -17,6 +18,7 @@ import {flushSyncCallbacks, scheduleSyncCallback} from "./syncTaskQueue"
 import {HostRoot} from "./workTags"
 
 let workInProgress: FiberNode | null = null
+let workInProgressRootRenderLane: Lane = NoLane
 
 // 更新的触发可以从fiber树中任意一个fiber node开始
 export function scheduleUpdateOnFiber(fiber: FiberNode, lanes: Lane) {
@@ -27,6 +29,7 @@ export function scheduleUpdateOnFiber(fiber: FiberNode, lanes: Lane) {
 	ensureRootIsScheduled(root)
 }
 
+// 调度阶段：选中高优先级更新然后进入render阶段、commit阶段，重复这一过程直到为NoLane
 function ensureRootIsScheduled(root: FiberRootNode) {
 	// 获取优先级
 	const updateLane = getHighestPriorityLane(root.pendingLanes)
@@ -62,18 +65,20 @@ function markUpdateFromFiberToRoot(fiber: FiberNode) {
 	return null
 }
 
-function prepareFreshStack(fiber: FiberRootNode) {
+function prepareFreshStack(fiber: FiberRootNode, lane: Lane) {
 	// 拿到的是host fiber，也就是说workInProgress最开始被赋值为host fiber（fiber的起点）
 	workInProgress = createWorkInProgress(fiber.current, {})
+	workInProgressRootRenderLane = lane
 }
 
 function performSyncWorkOnRoot(root: FiberRootNode, lane: Lane) {
 	const nextLane = getHighestPriorityLane(root.pendingLanes)
+	// 多个SyncLane更新放入队列等待执行，执行完第一个后就没必要执行后续相同优先级的更新了
 	if (nextLane !== SyncLane) {
 		ensureRootIsScheduled(root)
 		return
 	}
-	prepareFreshStack(root)
+	prepareFreshStack(root, lane)
 	do {
 		try {
 			workLoop()
@@ -84,6 +89,11 @@ function performSyncWorkOnRoot(root: FiberRootNode, lane: Lane) {
 	} while (true)
 	const finishedWork = root.current.alternate
 	root.finishedWork = finishedWork
+	root.finishedLanes = mergeLanes(
+		root.finishedLanes,
+		workInProgressRootRenderLane
+	)
+	workInProgressRootRenderLane = NoLane
 
 	commitRoot(root)
 }
@@ -93,7 +103,10 @@ function commitRoot(root: FiberRootNode) {
 	if (finishedWork === null) {
 		return
 	}
+	const lane = root.finishedLanes
 	root.finishedWork = null
+	root.finishedLanes = NoLane
+	markRootFinished(root, lane)
 
 	const subTreeHasFlags = (finishedWork.subFlags & MutationMask) !== NoFlags
 	const rootHasFlags = (finishedWork.flags & MutationMask) !== NoFlags
@@ -115,7 +128,7 @@ function workLoop() {
 }
 
 function performUnitOfWork(fiber: FiberNode) {
-	const next = beginWork(fiber)
+	const next = beginWork(fiber, workInProgressRootRenderLane)
 	fiber.memoizedProps = fiber.pendingProps
 
 	if (next === null) {
