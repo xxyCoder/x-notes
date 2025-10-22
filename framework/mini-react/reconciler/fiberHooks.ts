@@ -100,6 +100,7 @@ function updateState<T>(): [T, Dispatch<T>] {
 		currentRenderLane
 	)
 	hook.memoizedState = memoizedState
+	updateQueue.shared.pending = null
 
 	return [memoizedState, updateQueue.dispatch!]
 }
