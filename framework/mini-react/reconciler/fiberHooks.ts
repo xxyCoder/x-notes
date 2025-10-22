@@ -2,7 +2,9 @@ import internals from "../shared/internals"
 import {Action, TypeFunc} from "../shared/ReactTypes"
 import {Dispatcher, Dispatch} from "../src/currentDispatcher"
 import {FiberNode} from "./fiber"
+import {Flags, PassiveEffect} from "./fiberFlags"
 import {Lane, NoLane, requestUpdateLanes} from "./fiberLanes"
+import {HookHasEffect} from "./hookEffectTags"
 import {
 	createUpdate,
 	createUpdateQueue,
@@ -25,9 +27,25 @@ interface Hook {
 	next: Hook | null
 }
 
+type EffectCallback = (() => void) | void
+type EffectDeps = any[] | null
+
+export interface Effect {
+	tag: Flags
+	create: EffectCallback
+	destroy: EffectCallback
+	deps?: EffectDeps
+	next: Effect | null // 将effect形成一个链表，避免遍历外层memoizedState形成的所有hook链表
+}
+
+export interface FCUpdateQueue<State> extends UpdateQueue<State> {
+	lastEffect: Effect | null
+}
+
 export function renderWithHooks(fiber: FiberNode, renderLane: Lane) {
 	currentlyRenderingFiber = fiber
 	fiber.memoizedState = null
+	fiber.updateQueue = null
 	currentRenderLane = renderLane
 
 	const current = fiber.alternate
@@ -87,8 +105,74 @@ function mountWorkInProgressHook() {
 	return hook
 }
 
+function mountEffect(create: EffectCallback, deps?: EffectDeps) {
+	const hook = mountWorkInProgressHook()
+	const nextDeps = deps ?? null
+	if (!currentlyRenderingFiber) {
+		throw new Error("")
+	}
+	// mount阶段所有effect必然都要执行一次
+	currentlyRenderingFiber.flags |= PassiveEffect
+
+	hook.memoizedState = pushEffect(
+		PassiveEffect | HookHasEffect,
+		create,
+		void 0,
+		deps
+	)
+
+	const queue = createUpdateQueue()
+	hook.updateQueue = queue
+
+	const dispatch = dispatchSetState.bind(null, currentlyRenderingFiber, queue)
+	queue.dispatch = dispatch
+}
+
+function pushEffect(
+	hookFlags: Flags,
+	create: EffectCallback,
+	destroy: EffectCallback,
+	deps?: EffectDeps
+) {
+	const effect: Effect = {
+		create,
+		deps,
+		destroy,
+		tag: hookFlags,
+		next: null,
+	}
+	const fiber = currentlyRenderingFiber!
+	const updateQueue = fiber.updateQueue as FCUpdateQueue<any>
+	if (updateQueue === null) {
+		const updateQueue = createFCComponentUpdateQueue()
+		effect.next = effect
+		updateQueue.lastEffect = effect
+		fiber.updateQueue = updateQueue
+	} else {
+		const lastEffect = updateQueue.lastEffect
+		if (lastEffect === null) {
+			effect.next = effect
+		} else {
+			const firstEffect = lastEffect.next
+			lastEffect.next = effect
+			effect.next = firstEffect
+			updateQueue.lastEffect = effect
+		}
+	}
+
+	return effect
+}
+
+function createFCComponentUpdateQueue<State>() {
+	const updateQueue = createUpdateQueue<State>() as FCUpdateQueue<State>
+	updateQueue.lastEffect = null
+
+	return updateQueue
+}
+
 const HookDispatcherOnMount: Dispatcher = {
 	useState: mountState,
+	useEffect: mountEffect,
 }
 
 function updateState<T>(): [T, Dispatch<T>] {
@@ -145,6 +229,7 @@ function updateWorkInProgress() {
 
 const HookDispatcherOnUpdate: Dispatcher = {
 	useState: updateState,
+	useEffect: () => {},
 }
 
 function dispatchSetState<State>(

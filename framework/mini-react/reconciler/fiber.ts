@@ -1,5 +1,6 @@
 import {Key, Props, ReactElementType, Ref, Type} from "../shared/ReactTypes"
 import {Flags, NoFlags} from "./fiberFlags"
+import { Effect } from "./fiberHooks"
 import {Lanes, NoLane} from "./fiberLanes"
 import {UpdateQueue} from "./updateQueue"
 import {FunctionComponent, HostComponent, WorkTag} from "./workTags"
@@ -60,6 +61,11 @@ export class FiberNode {
 	}
 }
 
+
+export interface PendingPassiveEffects {
+	unmount: Effect[]
+	update: Effect[]
+}
 /**
  * 整个应用的入口控制器，双缓冲树的管理者
  * @param containerInfo 实际的DOM元素，如div#root
@@ -74,6 +80,7 @@ export class FiberRootNode {
 	finishedWork: FiberNode | null
 	pendingLanes: Lanes
 	finishedLanes: Lanes
+	pendingPassiveEffects: PendingPassiveEffects
 
 	// host root fiber定义了react fiber的边界，作为整个fiber树的起点
 	constructor(container: Element, hostRootFiber: FiberNode) {
@@ -85,6 +92,11 @@ export class FiberRootNode {
 
 		this.pendingLanes = NoLane
 		this.finishedLanes = NoLane
+
+		this.pendingPassiveEffects = {
+			unmount: [],
+			update: []
+		}
 	}
 }
 

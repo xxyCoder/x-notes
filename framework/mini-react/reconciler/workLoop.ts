@@ -1,9 +1,14 @@
 import {Props} from "../shared/ReactTypes"
 import beginWork from "./beginWork"
-import {commitMutationEffects} from "./commitWork"
+import {
+	commitHookEffectListCreate,
+	commitHookEffectListDestroy,
+	commitHookEffectListUnmount,
+	commitMutationEffects,
+} from "./commitWork"
 import completeWork from "./completeWork"
-import {FiberNode, FiberRootNode} from "./fiber"
-import {MutationMask, NoFlags} from "./fiberFlags"
+import {FiberNode, FiberRootNode, PendingPassiveEffects} from "./fiber"
+import {MutationMask, NoFlags, PassiveEffect, PassiveMask} from "./fiberFlags"
 import {
 	getHighestPriorityLane,
 	Lane,
@@ -13,12 +18,14 @@ import {
 	NoLane,
 	SyncLane,
 } from "./fiberLanes"
+import {HookHasEffect} from "./hookEffectTags"
 import {scheduleMicroTask} from "./hostConfig"
 import {flushSyncCallbacks, scheduleSyncCallback} from "./syncTaskQueue"
 import {HostRoot} from "./workTags"
 
 let workInProgress: FiberNode | null = null
 let workInProgressRootRenderLane: Lane = NoLane
+let rootDoesHasPassiveEffects: boolean = false
 
 // 更新的触发可以从fiber树中任意一个fiber node开始
 export function scheduleUpdateOnFiber(fiber: FiberNode, lanes: Lane) {
@@ -108,17 +115,46 @@ function commitRoot(root: FiberRootNode) {
 	root.finishedLanes = NoLane
 	markRootFinished(root, lane)
 
+	if (
+		(finishedWork.flags & PassiveMask) !== NoFlags ||
+		(finishedWork.subFlags & PassiveMask) !== NoFlags
+	) {
+		if (!rootDoesHasPassiveEffects) {
+			rootDoesHasPassiveEffects = true
+			// 使用调度器调度副作用
+			flushPassiveEffect(root.pendingPassiveEffects)
+		}
+	}
+
 	const subTreeHasFlags = (finishedWork.subFlags & MutationMask) !== NoFlags
 	const rootHasFlags = (finishedWork.flags & MutationMask) !== NoFlags
 	if (subTreeHasFlags || rootHasFlags) {
 		// beforeMutation
 		// mutation
-		commitMutationEffects(finishedWork)
+		commitMutationEffects(finishedWork, root)
 		root.current = finishedWork
 		// layout
 	} else {
 		root.current = finishedWork
 	}
+	rootDoesHasPassiveEffects = false
+	ensureRootIsScheduled(root)
+}
+
+function flushPassiveEffect(pendingPassiveEffects: PendingPassiveEffects) {
+	pendingPassiveEffects.unmount.forEach((effect) => {
+		commitHookEffectListUnmount(PassiveEffect, effect)
+	})
+	pendingPassiveEffects.unmount = []
+
+	pendingPassiveEffects.update.forEach((effect) => {
+		commitHookEffectListDestroy(PassiveEffect | HookHasEffect, effect)
+	})
+	pendingPassiveEffects.update.forEach((effect) => {
+		commitHookEffectListCreate(PassiveEffect | HookHasEffect, effect)
+	})
+	pendingPassiveEffects.update = []
+	flushPassiveEffect(pendingPassiveEffects) // 在useEffect中更新
 }
 
 function workLoop() {
