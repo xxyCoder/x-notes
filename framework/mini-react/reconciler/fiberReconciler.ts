@@ -1,11 +1,11 @@
 import {ReactElementType} from "../shared/ReactTypes"
 import {FiberNode, FiberRootNode} from "./fiber"
-import { requestUpdateLanes } from "./fiberLanes"
+import {requestUpdateLanes} from "./fiberLanes"
 import {createUpdate, createUpdateQueue, enqueueUpdate} from "./updateQueue"
-import { scheduleUpdateOnFiber } from "./workLoop"
+import {scheduleUpdateOnFiber} from "./workLoop"
 import {HostRoot} from "./workTags"
 
- export function createContainer(container: Element) {
+export function createContainer(container: Element) {
 	const hostRootFiber = new FiberNode(HostRoot, {}, null)
 	// 统一的根fiber
 	const root = new FiberRootNode(container, hostRootFiber)
@@ -20,6 +20,7 @@ export function updateContainer(
 ) {
 	const hostRootFiber = root.current
 	const lanes = requestUpdateLanes()
+	// element就是App函数返回的结果通过jsx处理后的ReactElement
 	const update = createUpdate<ReactElementType>(element, lanes)
 
 	enqueueUpdate<ReactElementType>(hostRootFiber.updateQueue!, update)

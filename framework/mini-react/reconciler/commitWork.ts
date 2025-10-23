@@ -5,6 +5,7 @@ import {
 	MutationMask,
 	NoFlags,
 	PassiveEffect,
+	PassiveMask,
 	Placement,
 	Update,
 } from "./fiberFlags"
@@ -29,7 +30,10 @@ export const commitMutationEffects = (
 
 	while (nextEffect !== null) {
 		const child = nextEffect.child
-		if ((nextEffect.subFlags & MutationMask) !== NoFlags && child !== null) {
+		if (
+			(nextEffect.subFlags & (MutationMask | PassiveMask)) !== NoFlags &&
+			child !== null
+		) {
 			nextEffect = child
 		} else {
 			up: while (nextEffect !== null) {

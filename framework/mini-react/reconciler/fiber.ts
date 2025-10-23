@@ -1,6 +1,6 @@
 import {Key, Props, ReactElementType, Ref, Type} from "../shared/ReactTypes"
 import {Flags, NoFlags} from "./fiberFlags"
-import { Effect } from "./fiberHooks"
+import {Effect} from "./fiberHooks"
 import {Lanes, NoLane} from "./fiberLanes"
 import {UpdateQueue} from "./updateQueue"
 import {FunctionComponent, HostComponent, WorkTag} from "./workTags"
@@ -16,23 +16,30 @@ export class FiberNode {
 	tag: WorkTag
 	index: number
 
+	/**
+	 * 对于host component以及host text存储的是真实的dom
+	 * function component存储为null
+	 * host root存储的是fiber root node
+	 */
 	stateNode: any
 
+	// 维护父子、兄弟指针关系
 	return: FiberNode | null
 	sibling: FiberNode | null
 	child: FiberNode | null
 
-	pendingProps: Props
-	memoizedProps: Props | null
+	pendingProps: Props // 待更新的props
+	memoizedProps: Props | null // 旧props
+	// function component存储的是hook链表
 	memoizedState: any
 
 	alternate: FiberNode | null
 
 	flags: Flags
 	subFlags: Flags
-	updateQueue: UpdateQueue<any> | null
+	updateQueue: UpdateQueue<any> | null // 更新队列，host root和function component类型会有
 
-	deletions: FiberNode[] | null
+	deletions: FiberNode[] | null // 子树中待删除的fiber数组
 
 	constructor(tag: WorkTag, pendingProps: Props, key: Key) {
 		this.type = null
@@ -60,7 +67,6 @@ export class FiberNode {
 		this.deletions = null
 	}
 }
-
 
 export interface PendingPassiveEffects {
 	unmount: Effect[]
@@ -95,7 +101,7 @@ export class FiberRootNode {
 
 		this.pendingPassiveEffects = {
 			unmount: [],
-			update: []
+			update: [],
 		}
 	}
 }

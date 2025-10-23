@@ -2,9 +2,9 @@ import internals from "../shared/internals"
 import {Action, TypeFunc} from "../shared/ReactTypes"
 import {Dispatcher, Dispatch} from "../src/currentDispatcher"
 import {FiberNode} from "./fiber"
-import {Flags, PassiveEffect} from "./fiberFlags"
+import {PassiveEffect} from "./fiberFlags"
 import {Lane, NoLane, requestUpdateLanes} from "./fiberLanes"
-import {HookHasEffect} from "./hookEffectTags"
+import {Flags, HookHasEffect, Passive} from "./hookEffectTags"
 import {
 	createUpdate,
 	createUpdateQueue,
@@ -107,18 +107,18 @@ function mountWorkInProgressHook() {
 
 function mountEffect(create: EffectCallback, deps?: EffectDeps) {
 	const hook = mountWorkInProgressHook()
-	const nextDeps = deps ?? null
+
 	if (!currentlyRenderingFiber) {
 		throw new Error("")
 	}
 	// mount阶段所有effect必然都要执行一次
 	currentlyRenderingFiber.flags |= PassiveEffect
-
+	const nextDeps = deps ?? null
 	hook.memoizedState = pushEffect(
 		PassiveEffect | HookHasEffect,
 		create,
 		void 0,
-		deps
+		nextDeps
 	)
 
 	const queue = createUpdateQueue()
@@ -227,9 +227,45 @@ function updateWorkInProgress() {
 	return newHook
 }
 
+function updateEffect(create: EffectCallback, deps?: EffectDeps) {
+	const hook = updateWorkInProgress()
+	const nextDeps = deps ?? null
+	let destroy: EffectCallback
+
+	if (currentHook !== null) {
+		const prevEffect = currentHook.memoizedState as Effect
+		destroy = prevEffect.destroy
+		if (nextDeps !== null) {
+			// 浅比较
+			const prevDeps = prevEffect.deps ?? null
+			if (areHookInputsEqual(nextDeps, prevDeps)) {
+				hook.memoizedState = pushEffect(Passive, create, destroy)
+				return
+			}
+		}
+		currentlyRenderingFiber!.flags |= PassiveEffect
+		hook.memoizedState = pushEffect(Passive | HookHasEffect, create, destroy)
+	}
+}
+
+function areHookInputsEqual(nextDeps: EffectDeps, prevDeps: EffectDeps) {
+	if (nextDeps === null || prevDeps === null) {
+		return false
+	}
+	if (nextDeps.length !== prevDeps.length) {
+		return false
+	}
+	for (let i = 0; i < nextDeps.length; i++) {
+		if (!Object.is(nextDeps[i], prevDeps[i])) {
+			return false
+		}
+	}
+	return true
+}
+
 const HookDispatcherOnUpdate: Dispatcher = {
 	useState: updateState,
-	useEffect: () => {},
+	useEffect: updateEffect,
 }
 
 function dispatchSetState<State>(

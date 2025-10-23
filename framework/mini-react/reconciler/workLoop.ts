@@ -32,8 +32,26 @@ export function scheduleUpdateOnFiber(fiber: FiberNode, lanes: Lane) {
 	const root = markUpdateFromFiberToRoot(fiber)
 	markRootUpdated(root, lanes)
 
-	// renderRoot(root)
 	ensureRootIsScheduled(root)
+}
+
+function markUpdateFromFiberToRoot(fiber: FiberNode) {
+	let node = fiber
+	let parent = fiber.return
+
+	while (parent !== null) {
+		node = parent
+		parent = parent.return
+	}
+	if (node.tag === HostRoot) {
+		// fiber root node
+		return node.stateNode
+	}
+	return null
+}
+
+function markRootUpdated(root: FiberRootNode, lanes: Lanes) {
+	root.pendingLanes = mergeLanes(root.pendingLanes, lanes)
 }
 
 // 调度阶段：选中高优先级更新然后进入render阶段、commit阶段，重复这一过程直到为NoLane
@@ -53,34 +71,9 @@ function ensureRootIsScheduled(root: FiberRootNode) {
 	}
 }
 
-function markRootUpdated(root: FiberRootNode, lanes: Lanes) {
-	root.pendingLanes = mergeLanes(root.pendingLanes, lanes)
-}
-
-function markUpdateFromFiberToRoot(fiber: FiberNode) {
-	let node = fiber
-	let parent = fiber.return
-
-	while (parent !== null) {
-		node = parent
-		parent = parent.return
-	}
-	if (node.tag === HostRoot) {
-		// fiber root node
-		return node.stateNode
-	}
-	return null
-}
-
-function prepareFreshStack(fiber: FiberRootNode, lane: Lane) {
-	// 拿到的是host fiber，也就是说workInProgress最开始被赋值为host fiber（fiber的起点）
-	workInProgress = createWorkInProgress(fiber.current, {})
-	workInProgressRootRenderLane = lane
-}
-
 function performSyncWorkOnRoot(root: FiberRootNode, lane: Lane) {
 	const nextLane = getHighestPriorityLane(root.pendingLanes)
-	// 多个SyncLane更新放入队列等待执行，执行完第一个后就没必要执行后续相同优先级的更新了
+	// 多个SyncLane更新放入队列等待执行，执行完第一个后（会将当前Lane删除）就没必要执行后续相同优先级的更新了
 	if (nextLane !== SyncLane) {
 		ensureRootIsScheduled(root)
 		return
@@ -126,8 +119,11 @@ function commitRoot(root: FiberRootNode) {
 		}
 	}
 
-	const subTreeHasFlags = (finishedWork.subFlags & MutationMask) !== NoFlags
-	const rootHasFlags = (finishedWork.flags & MutationMask) !== NoFlags
+	const subTreeHasFlags =
+		(finishedWork.subFlags & (MutationMask | PassiveMask)) !== NoFlags
+	const rootHasFlags =
+		(finishedWork.flags & (MutationMask | PassiveEffect)) !== NoFlags
+
 	if (subTreeHasFlags || rootHasFlags) {
 		// beforeMutation
 		// mutation
@@ -139,6 +135,12 @@ function commitRoot(root: FiberRootNode) {
 	}
 	rootDoesHasPassiveEffects = false
 	ensureRootIsScheduled(root)
+}
+
+function prepareFreshStack(fiber: FiberRootNode, lane: Lane) {
+	// 拿到的是host fiber，也就是说workInProgress最开始被赋值为host fiber（fiber的起点）
+	workInProgress = createWorkInProgress(fiber.current, {})
+	workInProgressRootRenderLane = lane
 }
 
 function flushPassiveEffect(pendingPassiveEffects: PendingPassiveEffects) {
