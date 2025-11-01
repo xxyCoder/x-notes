@@ -1,5 +1,6 @@
+import {updateFiberProps} from "../src/synctheticEvent"
 import {FiberNode} from "./fiber"
-import {Flags, NoFlags, Update} from "./fiberFlags"
+import {Flags, NoFlags, Ref, Update} from "./fiberFlags"
 import {
 	appendInitialChild,
 	createInstance,
@@ -25,10 +26,17 @@ export default function completeWork(fiber: FiberNode) {
 		case HostComponent:
 			if (current !== null && fiber.stateNode) {
 				// update
+				updateFiberProps(fiber.stateNode, fiber.pendingProps)
+				if (current.ref !== fiber.ref) {
+					markRef(fiber)
+				}
 			} else {
 				const instance = createInstance(fiber.type as string, pendingProps)
 				appendAllChildren(instance, fiber)
 				fiber.stateNode = instance
+				if (fiber.ref !== null) {
+					markRef(fiber)
+				}
 			}
 			bubbleProperties(fiber)
 			return
@@ -88,4 +96,8 @@ function bubbleProperties(fiber: FiberNode) {
 		child = child.sibling
 	}
 	fiber.subFlags |= subFlags
+}
+
+function markRef(fiber: FiberNode) {
+	fiber.flags |= Ref
 }

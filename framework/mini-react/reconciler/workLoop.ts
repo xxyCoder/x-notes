@@ -4,6 +4,7 @@ import {
 	commitHookEffectListCreate,
 	commitHookEffectListDestroy,
 	commitHookEffectListUnmount,
+	commitLayoutEffects,
 	commitMutationEffects,
 } from "./commitWork"
 import completeWork from "./completeWork"
@@ -128,8 +129,8 @@ function commitRoot(root: FiberRootNode) {
 		// beforeMutation
 		// mutation
 		commitMutationEffects(finishedWork, root)
-		root.current = finishedWork
-		// layout
+		root.current = finishedWork // fiber树切换
+		commitLayoutEffects(finishedWork, root)
 	} else {
 		root.current = finishedWork
 	}
@@ -210,6 +211,7 @@ export function createWorkInProgress(current: FiberNode, pendingProps: Props) {
 	wip.child = current.child
 	wip.memoizedProps = current.memoizedProps
 	wip.memoizedState = current.memoizedState
+	wip.ref = current.ref
 
 	return wip
 }

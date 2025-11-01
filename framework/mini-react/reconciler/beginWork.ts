@@ -1,6 +1,7 @@
 import {Props} from "../shared/ReactTypes"
 import {mountChildrenFibers, reconcilerChildFibers} from "./childFibers"
 import {FiberNode} from "./fiber"
+import {Ref} from "./fiberFlags"
 import {renderWithHooks} from "./fiberHooks"
 import {Lane} from "./fiberLanes"
 import {processUpdateQueue} from "./updateQueue"
@@ -54,6 +55,7 @@ function updateHostComponent(fiber: FiberNode) {
 	// 对于host component类型的fiber，其子元素存在于props.children中（jsx编译后会将children存放在react element的props中，也就是fiber的pendingProps）
 	const nextProps = fiber.pendingProps
 	const nextChildren = nextProps.children
+	markRef(fiber.alternate, fiber)
 
 	reconcilerChildren(fiber, nextChildren)
 	return fiber.child
@@ -67,5 +69,17 @@ function reconcilerChildren(fiber: FiberNode, children: Props["children"]) {
 	} else {
 		// update
 		fiber.child = reconcilerChildFibers(fiber, current.child, children)
+	}
+}
+
+function markRef(current: FiberNode | null, wip: FiberNode) {
+	const ref = wip.ref
+
+	// mount时存在ref或update时更新ref
+	if (
+		(current === null && ref !== null) ||
+		(current !== null && current.ref != ref)
+	) {
+		wip.flags |= Ref
 	}
 }

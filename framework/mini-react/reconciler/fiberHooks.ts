@@ -170,9 +170,18 @@ function createFCComponentUpdateQueue<State>() {
 	return updateQueue
 }
 
+function mountRef<T>(initialValue: T): {current: T} {
+	const hook = mountWorkInProgressHook()
+	const ref = {current: initialValue}
+	hook.memoizedState = ref
+
+	return ref
+}
+
 const HookDispatcherOnMount: Dispatcher = {
 	useState: mountState,
 	useEffect: mountEffect,
+	useRef: mountRef,
 }
 
 function updateState<T>(): [T, Dispatch<T>] {
@@ -263,9 +272,15 @@ function areHookInputsEqual(nextDeps: EffectDeps, prevDeps: EffectDeps) {
 	return true
 }
 
+function updateRef<T>(): {current: T} {
+	const hook = updateWorkInProgress()
+	return hook.memoizedState
+}
+
 const HookDispatcherOnUpdate: Dispatcher = {
 	useState: updateState,
 	useEffect: updateEffect,
+	useRef: updateRef,
 }
 
 function dispatchSetState<State>(

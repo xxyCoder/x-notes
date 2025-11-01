@@ -1,11 +1,11 @@
 export type Key = any
-export type Ref = any
+export type Ref = {current: any} | ((instance: any) => void)
 export type SingleChildren = ReactElementType | string | number
 export type Props = {
 	children?: SingleChildren | SingleChildren[]
 	content?: string | number
 }
-export type TypeFunc = ((props?: Props) => ReactElementType)
+export type TypeFunc = (props?: Props) => ReactElementType
 export type Type = string | TypeFunc | null
 export type Action<State> = State | ((prevState: State) => State)
 

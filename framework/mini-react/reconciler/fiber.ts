@@ -12,7 +12,7 @@ import {FunctionComponent, HostComponent, WorkTag} from "./workTags"
 export class FiberNode {
 	type: Type
 	key: Key
-	ref: Ref
+	ref: Ref | null
 	tag: WorkTag
 	index: number
 
@@ -107,7 +107,7 @@ export class FiberRootNode {
 }
 
 export function createFiberFromElement(element: ReactElementType) {
-	const {type, key, props} = element
+	const {type, key, props, ref} = element
 	let fiberWorkTag: WorkTag = FunctionComponent
 	if (typeof type === "string") {
 		fiberWorkTag = HostComponent
@@ -117,6 +117,7 @@ export function createFiberFromElement(element: ReactElementType) {
 
 	const fiber = new FiberNode(fiberWorkTag, props, key)
 	fiber.type = type
+	fiber.ref = ref
 
 	return fiber
 }
