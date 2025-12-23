@@ -179,5 +179,6 @@ def request_response(
 
 ```
 
-1. 路径解析，生成 `path_regex`（用于匹配）、`path_format`（用于反向生成 URL）和 `param_convertors`（用于类型转换）
-2. 如果匹配成功，拿到路径参数进行类型转换
+1. 将同步函数通过 `run_in_threadpool`包裹为异步函数
+2. 路径解析，生成 `path_regex`（用于匹配）、`path_format`（用于反向生成 URL）和 `param_convertors`（用于类型转换）
+3. 如果匹配成功，拿到路径参数进行类型转换
