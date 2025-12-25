@@ -89,7 +89,7 @@ func (fd *FD) Read(p []byte) (int, error) {
     for {
         // 3. 直接发起非阻塞的系统调用 syscall.Read
         n, err := ignoringEINTRIO(syscall.Read, fd.Sysfd, p)
-    
+  
         if err != nil {
             // 4. 如果返回 EAGAIN，说明内核缓冲区现在没数据
             if err == syscall.EAGAIN && fd.pd.runtime_pollWait(uintptr('r')) == 0 {
@@ -98,7 +98,7 @@ func (fd *FD) Read(p []byte) (int, error) {
                 continue
             }
         }
-    
+  
         // 6. 如果 err != nil 且不是 EAGAIN，或者读到了数据，则返回
         return n, err
     }
@@ -257,7 +257,6 @@ func setWriteBuffer(fd *netFD, bytes int) error {
 
 ## Linux自动调优
 
-
 $$
 BDP = 带宽 (\text{bps}) \times 往返时延 (\text{RTT, s})
 $$
@@ -265,3 +264,92 @@ $$
 **物理意义** ：BDP 代表了“在任何给定时刻，已经发出但尚未被确认（在途）的最大数据量”。
 
 如果你的 TCP 窗口（缓冲区）比 BDP 小，那么在“确认信号（ACK）”从对方传回你这里之前，你已经把窗口发满了，不得不停下来等。这时，水管就是空的，带宽被白白浪费了，自动调优的目标就是让缓冲区大小始终**略大于或等于**当前的 BDP
+
+## Dialer
+
+```go
+type Dialer struct {
+
+	Timeout time.Duration
+
+	Deadline time.Time
+
+	LocalAddr Addr
+
+	FallbackDelay time.Duration
+
+	KeepAlive time.Duration
+
+	KeepAliveConfig KeepAliveConfig
+
+	Resolver *Resolver
+}
+
+
+func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn, error) {
+    // 1. 解析地址：返回一个 IP 列表（可能包含 IPv4 和 IPv6）
+    addrs, err := d.resolver().resolveAddrList(ctx, "dial", network, address, d.LocalAddr)
+  
+    // 2. 如果解析出多个地址，进入并发竞速逻辑
+    if len(addrs) > 1 && d.fallbackDelay() >= 0 {
+        return d.dialParallel(ctx, network, addrs)
+    }
+  
+    // 3. 只有一个地址或禁用并行，则串行连接
+    return d.dialSerial(ctx, network, addrs[0])
+}
+
+func (d *Dialer) dialParallel(ctx context.Context, network string, addrs addrList) (Conn, error) {
+    returned := make(chan struct{}) // 用于通知其他协程停止尝试
+    results := make(chan dialResult) // 接收连接结果的通道
+
+    // 尝试启动第一个连接（通常是 IPv6）
+    go func() {
+        // ... dialSerial ...
+        results <- dialResult{conn, err}
+    }()
+
+    // 启动定时器：等待 fallbackDelay (默认 300ms)
+    // 如果第一个没连上，就启动第二个连接（通常是 IPv4）
+    timer := time.NewTimer(d.fallbackDelay())
+  
+    for i := 0; i < len(addrs); i++ {
+        select {
+        case res := <-results:
+            if res.err == nil {
+                close(returned) // 赢家诞生，关闭通道通知其他人
+                return res.conn, nil
+            }
+        case <-timer.C:
+            // 时间到，启动下一个地址的连接
+            go dialNextAddr()
+        }
+    }
+}
+
+
+func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlFn func(string, string, syscall.RawConn) error) error {
+    // 1. 创建系统 Socket，注意：默认就是非阻塞的 (SOCK_NONBLOCK)
+    if err := fd.ctrlNetwork(ctx, laddr, raddr, ctrlFn); err != nil {
+        return err
+    }
+
+    // 2. 执行真正的连接
+    if err := fd.pfd.Connect(laddr, raddr); err != nil {
+        // 如果返回 EINPROGRESS，说明正在握手中，需要 netpoller 介入
+        if err == syscall.EINPROGRESS {
+            if err := fd.pfd.WaitWrite(); err != nil {
+                return err
+            }
+            // 唤醒后再次检查 Socket 错误状态
+            if err := fd.pfd.CheckError(); err != nil {
+                return err
+            }
+        }
+    }
+}
+```
+
+1. 会通过 `Resolver.resolveAddrList`进行域名解析，如果既有ipv6又有ipv4，会先通过goroutine启动ipv6连接，超过 `FallbackDelay`（默认300ms）还没连上就再启动goroutine连接ipv4地址，当其中一个连接成功后中断另一个
+2. 开启非阻塞连接，当TCP没握手完成就挂起当前goroutine
+3. 当TCP完成，内核会触发该 FD 的“可写”事件，`netpoller` 收到通知，唤醒挂起的 Goroutine
