@@ -74,7 +74,9 @@ func LimitReader(r Reader, n int64) Reader { return &LimitedReader{r, n} }
 
 2. 双通接口
 
-```
+p仅仅是“中间人"，当作临时存储的媒介，当然调用者也可以拿到读取到的数据
+
+```go
 func TeeReader(r Reader, w Writer) Reader {
 	return &teeReader{r, w}
 }
@@ -95,7 +97,7 @@ func (t *teeReader) Read(p []byte) (n int, err error) {
 }
 ```
 
-3. 多次读
+5. 多次读
 
 ```go
 func MultiReader(readers ...Reader) Reader {

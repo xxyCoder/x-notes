@@ -104,7 +104,7 @@ func Count(s, sep []byte) int {
 
 ## Join
 
-```
+```go
 func Join(s [][]byte, sep []byte) []byte {
 	if len(s) == 0 {
 		return []byte{}
@@ -144,7 +144,7 @@ func Join(s [][]byte, sep []byte) []byte {
 
 ## Repeat
 
-```
+```go
 func Repeat(b []byte, count int) []byte {
 	if count == 0 {
 		return []byte{}
@@ -189,6 +189,10 @@ func Repeat(b []byte, count int) []byte {
 ```go
 func Split(s, sep []byte) [][]byte { return genSplit(s, sep, 0, -1) }
 
+func SplitAfter(s, sep []byte) [][]byte {
+	return genSplit(s, sep, len(sep), -1)
+}
+
 func genSplit(s, sep []byte, sepSave, n int) [][]byte {
 	if n == 0 {
 		return nil
@@ -222,7 +226,15 @@ func genSplit(s, sep []byte, sepSave, n int) [][]byte {
 
 分割的数量为Count(s, sep) + 1，通过Index辅助进行分割
 
-```
+其中sepSave表示额外要保留的长度，`SplitAfter`为分隔符长度（即保留分隔符）
+
+`s[low:high:max]` 被称为扩展切片表达式，可以让容量和长度一致，后续对 `a[i]`调用 `append`方法则可以不覆盖原数据 `s`
+
+- **起始指针** ：指向原切片索引为 `low` 的元素
+- **长度 (**$Length$**)** ：**$high - low$**
+- **容量 (**$Capacity$**)** ：**$max - low$**
+
+```go
 func Trim(s []byte, cutset string) []byte {
 	if len(s) == 0 {
 		// This is what we've historically done.

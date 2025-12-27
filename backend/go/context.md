@@ -31,9 +31,9 @@ func main() {
 2. 什么情况下会返回zerobase?
 
    * 只有被分配在堆上，并且占据大小为0
+   * 当空对象在结构体中不是最后一个的情况（地址等于下一个字段的地址）
 3. 什么情况下不会返回zerobase?
 
-   * 当空对象在结构体中不是最后一个的情况（地址等于下一个字段的地址）
    * 当对象在结构体中末尾（会单独分配一个字节内存，这是因为末尾需要撑开一个字节，避免访问末尾空对象指针，导致返回到下一内存地址真正的对象）
      * 假设你在内存里连续创建了两个对象：`d1` (Data) 和 `d2` (其他对象)
      * 如果没有填充，`&d1.d` 的地址恰好就是 `&d2` 的起始地址，这时候，如果你把 `&d1.d` 这个指针传给了某个函数。
@@ -108,25 +108,6 @@ func WithCancel(parent Context) (ctx Context, cancel CancelFunc) {
 	c := withCancel(parent)
 	return c, func() { c.cancel(true, Canceled, nil) }
 }
-```
-
-done 只有第一次调用Done方法的时候才会进行channel创建，如果只是创建cancelCtx而没有监听，则可以避免性能开销
-
-```go
-func (c *cancelCtx) Done() <-chan struct{} {
-	d := c.done.Load()
-	if d != nil {
-		return d.(chan struct{})
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	d = c.done.Load()
-	if d == nil {
-		d = make(chan struct{}) // 第一次也仅仅第一次进行创建
-		c.done.Store(d)
-	}
-	return d.(chan struct{})
-}
 
 // 会触发下面的逻辑
 func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
@@ -183,6 +164,25 @@ func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 		case <-child.Done():
 		}
 	}()
+}
+```
+
+done 只有第一次调用Done方法的时候才会进行channel创建，如果只是创建cancelCtx而没有监听，则可以避免性能开销
+
+```go
+func (c *cancelCtx) Done() <-chan struct{} {
+	d := c.done.Load()
+	if d != nil {
+		return d.(chan struct{})
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	d = c.done.Load()
+	if d == nil {
+		d = make(chan struct{}) // 第一次也仅仅第一次进行创建
+		c.done.Store(d)
+	}
+	return d.(chan struct{})
 }
 ```
 
@@ -311,7 +311,7 @@ func WithDeadlineCause(parent Context, d time.Time, cause error) (Context, Cance
 2. timer是一个定时器，过了指定时间后就开始执行cancel
 3. 对于cancel进行重写
 
-```
+```go
 func (c *timerCtx) cancel(removeFromParent bool, err, cause error) {
 	c.cancelCtx.cancel(false, err, cause)
 	if removeFromParent {

@@ -69,7 +69,7 @@ func (b *Builder) Write(p []byte) (int, error) {
 }
 ```
 
-实际写入的是buf中
+实际写入的是buf中，如果调用了 `Reset`再进行 `Write`也没有事，`append`会将nil当作一个长度为 0 的空切片来处理
 
 ## Reader
 
