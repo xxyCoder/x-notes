@@ -32,7 +32,7 @@ func (b *Writer) Write(p []byte) (nn int, err error) {
             // 如果数据很大且缓冲区是空的，直接越过缓冲区发起系统调用 (即所谓的“大块直写”)
             n, b.err = b.wr.Write(p)
         } else {
-            // 将当前缓冲区填满并刷新到内核
+            // 将当前缓冲区填满并刷新到内核，只要缓冲区里有旧数据，新数据必须“排队”
             n = copy(b.buf[b.n:], p)
             b.n += n
             b.flush() // 这里会触发系统调用 syscall.Write
@@ -56,3 +56,135 @@ func (b *Writer) Write(p []byte) (nn int, err error) {
    1. 调用 `w.Write([]byte("hello"))`，放入用户缓冲区，发现没满就不会着急发出去，当你的 `ServeHTTP` 函数执行完毕返回时，Go 检查缓冲区，发现所有数据都在这了，Go 自动计算出 `Content-Length: 5`，把 Header 和 Body 一起打包发给客户端
    2. 不断调用 `w.Write()`，用户缓冲区很快就满了，Go 不能再等了（为了节省服务器内存），它必须开始发送，由于还没写完，Go 不知道最终会有多大，于是它**自动切换到 `Transfer-Encoding: chunked`** 模式
    3. 调用 `w.Write()` 写入了 10 字节，紧接着调用了 `w.(http.Flusher).Flush()`，因为还要继续写，Go 无法预知总长度，所以即便数据只有 10 字节，它也会**被迫使用分块传输**
+
+## Server
+
+```go
+type Server struct {
+	Addr string
+
+	Handler Handler 
+
+
+	DisableGeneralOptionsHandler bool
+
+	TLSConfig *tls.Config
+
+	ReadTimeout time.Duration
+
+	ReadHeaderTimeout time.Duration
+
+	WriteTimeout time.Duration
+
+	IdleTimeout time.Duration
+
+	MaxHeaderBytes int
+
+	TLSNextProto map[string]func(*Server, *tls.Conn, Handler)
+
+	ConnState func(net.Conn, ConnState)
+
+	ErrorLog *log.Logger
+
+	BaseContext func(net.Listener) context.Context
+
+
+	ConnContext func(ctx context.Context, c net.Conn) context.Context
+
+
+	HTTP2 *HTTP2Config
+
+	Protocols *Protocols
+
+	inShutdown atomic.Bool 
+
+	disableKeepAlives atomic.Bool
+	nextProtoOnce     sync.Once
+	nextProtoErr      error   
+
+	mu         sync.Mutex
+	listeners  map[*net.Listener]struct{}
+	activeConn map[*conn]struct{}
+	onShutdown []func()
+
+	listenerGroup sync.WaitGroup
+}
+```
+
+1. 基本属性
+   * `Addr`: 监听地址。如果不填，默认是 `:80`。
+   * `Handler`: 路由分发器。如果为 `nil`，系统会使用全局默认的 `http.DefaultServeMux`
+   * **`maxHeaderBytes`** ：这是一个安全屏障。为了防止  **Slowloris 攻击** （发送超大 Header 占满服务器内存），Go 允许你限制 Header 的最大字节数（默认约 1MB）
+2. 超时控制
+   * `ReadHeaderTimeout`：仅读取请求头的时间
+   * `ReadTimeout`：读取整个请求（含 Body）的时间
+   * `WriteTimeout`：从读取完 Header 开始计时。如果响应数据很大或网络慢，可能导致写入中断
+   * `IdleTimeout`：决定长连接在没请求时多久被回收，如果不设，则复用 `ReadTimeout`
+
+## ListenAndServe
+
+```go
+func ListenAndServe(addr string, handler Handler) error {
+	server := &Server{Addr: addr, Handler: handler}
+	return server.ListenAndServe()
+}
+
+func (s *Server) ListenAndServe() error {
+	if s.shuttingDown() {
+		return ErrServerClosed
+	}
+	addr := s.Addr
+	if addr == "" {
+		addr = ":http"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return s.Serve(ln)
+}
+
+func (s *Server) Serve(l net.Listener) error {
+	origListener := l
+	l = &onceCloseListener{Listener: l}
+	defer l.Close()
+
+
+	baseCtx := context.Background()
+	if s.BaseContext != nil {
+		baseCtx = s.BaseContext(origListener)
+		if baseCtx == nil {
+			panic("BaseContext returned a nil context")
+		}
+	}
+
+	var tempDelay time.Duration // how long to sleep on accept failure
+
+	ctx := context.WithValue(baseCtx, ServerContextKey, s)
+	for {
+		rw, err := l.Accept()
+		if err != nil {
+			if s.shuttingDown() {
+				return ErrServerClosed
+			}
+			return err
+		}
+		connCtx := ctx
+		if cc := s.ConnContext; cc != nil {
+			connCtx = cc(connCtx, rw)
+			if connCtx == nil {
+				panic("ConnContext returned nil")
+			}
+		}
+		tempDelay = 0
+		c := s.newConn(rw)
+		c.setState(c.rwc, StateNew, runHooks) // before Serve can return
+		go c.serve(connCtx)
+	}
+}
+```
+
+1. 创建 `TCP`连接
+2. 进入一个无限的 `for` 循环，不断执行 `Accept()` 接收新连接
+3. 每接收到一个新连接，服务器都会 **`go c.serve(connCtx)`**
+4. 在每个连接的 Goroutine 里，循环读取 HTTP 请求，解析协议，并最终调用 `Handler.ServeHTTP`
