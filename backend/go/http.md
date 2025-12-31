@@ -188,3 +188,213 @@ func (s *Server) Serve(l net.Listener) error {
 2. 进入一个无限的 `for` 循环，不断执行 `Accept()` 接收新连接
 3. 每接收到一个新连接，服务器都会 **`go c.serve(connCtx)`**
 4. 在每个连接的 Goroutine 里，循环读取 HTTP 请求，解析协议，并最终调用 `Handler.ServeHTTP`
+
+## 路由服务
+
+```go
+type HandlerFunc func(ResponseWriter, *Request)
+
+func HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
+	if use121 {
+		DefaultServeMux.mux121.handleFunc(pattern, handler)
+	} else {
+		DefaultServeMux.register(pattern, HandlerFunc(handler)) // 强制将函数转换成了类型
+ 		// 这个 HandlerFunc 类型实现了 ServeHTTP 方法，所以它现在是一个合法的 Handler 接口对象了
+	}
+}
+
+func Handle(pattern string, handler Handler) {
+	if use121 {
+		DefaultServeMux.mux121.handle(pattern, handler)
+	} else {
+		DefaultServeMux.register(pattern, handler)
+	}
+}
+```
+
+`http.HandleFunc`将一个普通的函数，注册到全局默认的路由分发器（DefaultServeMux）中，并将其包装成一个符合 `Handler` 接口的对象，比 `http.Handle`简洁
+
+```go
+type ServeMux struct {
+	mu     sync.RWMutex
+	tree   routingNode
+	index  routingIndex
+	mux121 serveMux121 // used only when GODEBUG=httpmuxgo121=1
+}
+
+var DefaultServeMux = &defaultServeMux
+
+var defaultServeMux ServeMux
+
+// ServeHTTP dispatches the request to the handler whose
+// pattern most closely matches the request URL.
+func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
+	if r.RequestURI == "*" {
+		if r.ProtoAtLeast(1, 1) {
+			w.Header().Set("Connection", "close")
+		}
+		w.WriteHeader(StatusBadRequest)
+		return
+	}
+	var h Handler
+	if use121 {
+		h, _ = mux.mux121.findHandler(r)
+	} else {
+		h, r.Pattern, r.pat, r.matches = mux.findHandler(r)
+	}
+	h.ServeHTTP(w, r)
+}
+```
+
+`ServeMux`根据请求的 URL 路径，把请求分发给对应的 Handler
+
+### 路径匹配
+
+1. 固定路径，不以'/'结尾，需要精准匹配
+2. 子树路径，以'/'结尾，需要进行前缀匹配，如果有多个匹配结果选最长匹配
+
+```go
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"strings"
+)
+
+func main() {
+	// 1. 固定路径
+	http.HandleFunc("/about", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "About Page")
+	})
+
+	// 2. 子树路径
+	http.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "API Root")
+	})
+
+	// 3. 更具体的子树路径
+	http.HandleFunc("/api/v1/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "API V1")
+	})
+
+	fmt.Println("Server starting at :8080")
+	http.ListenAndServe(":8080", nil)
+}
+
+```
+
+### 路由存储
+
+```go
+// A routingNode is a node in the decision tree.
+// The same struct is used for leaf and interior nodes.
+type routingNode struct {
+	// A leaf node holds a single pattern and the Handler it was registered
+	// with.
+	pattern *pattern
+	handler Handler
+
+	// An interior node maps parts of the incoming request to child nodes.
+	// special children keys:
+	//     "/"	trailing slash (resulting from {$})
+	//	   ""   single wildcard
+	children   mapping[string, *routingNode] // 精确匹配的子节点
+	multiChild *routingNode // child with multi wildcard // 处理通配符 {...} 的节点
+	emptyChild *routingNode // optimization: child with key "" // 处理单通配符 {} 的节点
+}
+
+type pattern struct {
+	str    string // original string
+	method string
+	host   string
+	segments []segment
+	loc      string // source location of registering call, for helpful messages
+}
+
+type segment struct {
+	s     string // literal or wildcard name or "/" for "/{$}".
+	wild  bool
+	multi bool // "..." wildcard
+}
+```
+
+```
+&http.ServeMux{
+    mu: { ... },
+    // 路由树开始
+    tree: routingNode{
+        pattern: nil,
+        handler: nil,
+        // 第一层：根据 Host 划分（如果有的话）
+        children: {
+            "example.com": &routingNode{
+                // 处理 "GET example.com/user/{id}"
+                children: {
+                    "user": &routingNode{
+                        emptyChild: &routingNode{ // 对应 {id}
+                            pattern: &pattern{
+                                str:    "GET example.com/user/{id}",
+                                method: "GET",
+                                host:   "example.com",
+                                segments: []segment{
+                                    {s: "user", wild: false, multi: false},
+                                    {s: "id",   wild: true,  multi: false},
+                                },
+                            },
+                            handler: http.HandlerFunc(func1),
+                        },
+                    },
+                },
+            },
+            // 无 Host 的路由默认在空的 children 或特殊节点下
+            "api": &routingNode{
+                children: {
+                    "v1": &routingNode{
+                        // 对应 POST /api/v1/{$}
+                        children: {
+                            "/": &routingNode{ // {$} 内部被表示为字面量 "/"
+                                pattern: &pattern{
+                                    str:    "POST /api/v1/{$}",
+                                    method: "POST",
+                                    segments: []segment{
+                                        {s: "api", wild: false, multi: false},
+                                        {s: "v1",  wild: false, multi: false},
+                                        {s: "/",   wild: false, multi: false},
+                                    },
+                                },
+                                handler: http.HandlerFunc(func2),
+                            },
+                        },
+                    },
+                },
+            },
+            "static": &routingNode{
+                // 对应 /static/...
+                multiChild: &routingNode{ // "..." 被解析为 multiChild
+                    pattern: &pattern{
+                        str: "/static/...",
+                        segments: []segment{
+                            {s: "static", wild: false, multi: false},
+                            {s: "",       wild: true,  multi: true},
+                        },
+                    },
+                    handler: http.HandlerFunc(func3),
+                },
+            },
+        },
+        // 对应 /{any}
+        emptyChild: &routingNode{
+            pattern: &pattern{
+                str: "/{any}",
+                segments: []segment{
+                    {s: "any", wild: true, multi: false},
+                },
+            },
+            handler: http.HandlerFunc(func4),
+        },
+    },
+    // 优化索引，用于处理 Method 和 Host 的快速过滤
+    index: routingIndex{ ... }, 
+}
+```
