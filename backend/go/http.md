@@ -398,3 +398,225 @@ type segment struct {
     index: routingIndex{ ... }, 
 }
 ```
+
+## Client
+
+```go
+type Client struct {
+    // Transport 决定了请求是如何发出的（连接池、TLS、代理等）
+    Transport RoundTripper
+
+    // CheckRedirect 定义重定向策略
+    CheckRedirect func(req *Request, via []*Request) error
+
+    // Jar 处理 Cookie 的存储和读取
+    Jar CookieJar
+
+    // Timeout 限制整个请求的时间（从连接、发送到读取响应体结束）
+    Timeout time.Duration
+}
+
+var DefaultClient = &Client{}
+
+// 简化
+func (c *Client) Do(req *Request) (*Response, error) {
+    // 1. 基础检查
+    if req.URL == nil {
+        return nil, errors.New("http: nil Request.URL")
+    }
+
+    var (
+        deadline      time.Time
+        didTimeout    func() bool
+        resp          *Response
+        err           error
+        // ... 其他状态变量
+    )
+
+    // 2. 超时处理：计算截止时间
+    deadline = c.deadline() // 根据 c.Timeout 计算
+
+    for {
+        // 3. 准备当前请求：注入 Cookie
+        if c.Jar != nil {
+            for _, cookie := range c.Jar.Cookies(req.URL) {
+                req.AddCookie(cookie)
+            }
+        }
+
+        // 4. 发送请求：核心调用 Transport.RoundTrip
+        resp, didTimeout, err = c.send(req, deadline)
+        if err != nil {
+            return nil, err
+        }
+
+	if c.Jar != nil {
+		if rc := resp.Cookies(); len(rc) > 0 {
+			c.Jar.SetCookies(req.URL, rc)
+		}
+	}
+
+        // 5. 处理重定向
+        redirectMethod, shouldRedirect, includeBody := redirectBehavior(req.Method, resp, req)
+        if !shouldRedirect {
+            return resp, nil // 不需要重定向，直接返回响应
+        }
+
+        // 6. 检查重定向次数 (默认上限 10 次)
+        if len(reqs) >= 10 {
+            return nil, errors.New("http: too many redirects")
+        }
+
+        // 7. 更新请求对象，准备进入下一次循环
+        req = nextRequest // 构造重定向后的新请求
+    }
+}
+```
+
+其他方法比如 `Get`、`Post`和 `PostForm`都是对 `Do`的封装调用
+
+```go
+func (c *Client) Get(url string) (resp *Response, err error) {
+	req, err := NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.Do(req)
+}
+
+func (c *Client) Post(url, contentType string, body io.Reader) (resp *Response, err error) {
+	req, err := NewRequest("POST", url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	return c.Do(req)
+}
+```
+
+## Request
+
+```go
+type Request struct {
+    Method           string        // GET, POST, PUT 等
+    URL              *url.URL      // 解析后的 URL 对象
+    Proto            string        // "HTTP/1.1"
+    Header           Header        // map[string][]string，存储所有 Header
+    Body             io.ReadCloser // 请求体，是一个流，只能读取一次
+    ContentLength    int64         // 内容长度
+    Host             string        // 目标主机名
+  
+    // 表单数据（需调用 ParseForm 后才有数据）
+    Form             url.Values    // 包含 URL 查询参数和 POST 表单数据
+    PostForm         url.Values    // 仅包含 POST 表单数据
+    MultipartForm    *multipart.Form
+
+    // 上下文（非常重要）
+    ctx context.Context
+
+    // 还有 RemoteAddr, TLS, RequestURI 等...
+}
+```
+
+### 常用方法
+
+```go
+func NewRequest(method, url string, body io.Reader) (*Request, error) {
+	return NewRequestWithContext(context.Background(), method, url, body)
+}
+
+func NewRequestWithContext(ctx context.Context, method, url string, body io.Reader) (*Request, error) {
+	if method == "" {
+		// We document that "" means "GET" for Request.Method, and people have
+		// relied on that from NewRequest, so keep that working.
+		// We still enforce validMethod for non-empty methods.
+		method = "GET"
+	}
+	if !validMethod(method) {
+		return nil, fmt.Errorf("net/http: invalid method %q", method)
+	}
+	if ctx == nil {
+		return nil, errors.New("net/http: nil Context")
+	}
+	u, err := urlpkg.Parse(url)
+	if err != nil {
+		return nil, err
+	}
+	rc, ok := body.(io.ReadCloser)
+	if !ok && body != nil {
+		rc = io.NopCloser(body)
+	}
+	// The host's colon:port should be normalized. See Issue 14836.
+	u.Host = removeEmptyPort(u.Host)
+	req := &Request{
+		ctx:        ctx,
+		Method:     method,
+		URL:        u,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     make(Header),
+		Body:       rc,
+		Host:       u.Host,
+	}
+	if body != nil {
+		switch v := body.(type) {
+		case *bytes.Buffer:
+			req.ContentLength = int64(v.Len())
+			buf := v.Bytes()
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := bytes.NewReader(buf)
+				return io.NopCloser(r), nil
+			}
+		case *bytes.Reader:
+			req.ContentLength = int64(v.Len())
+			snapshot := *v
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := snapshot
+				return io.NopCloser(&r), nil
+			}
+		case *strings.Reader:
+			req.ContentLength = int64(v.Len())
+			snapshot := *v
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := snapshot
+				return io.NopCloser(&r), nil
+			}
+		default:
+			// This is where we'd set it to -1 (at least
+			// if body != NoBody) to mean unknown, but
+			// that broke people during the Go 1.8 testing
+			// period. People depend on it being 0 I
+			// guess. Maybe retry later. See Issue 18117.
+		}
+		// For client requests, Request.ContentLength of 0
+		// means either actually 0, or unknown. The only way
+		// to explicitly say that the ContentLength is zero is
+		// to set the Body to nil. But turns out too much code
+		// depends on NewRequest returning a non-nil Body,
+		// so we use a well-known ReadCloser variable instead
+		// and have the http package also treat that sentinel
+		// variable to mean explicitly zero.
+		if req.GetBody != nil && req.ContentLength == 0 {
+			req.Body = NoBody
+			req.GetBody = func() (io.ReadCloser, error) { return NoBody, nil }
+		}
+	}
+
+	return req, nil
+}
+
+func (r *Request) WithContext(ctx context.Context) *Request {
+	if ctx == nil {
+		panic("nil context")
+	}
+	r2 := new(Request)
+	*r2 = *r // 值拷贝
+	r2.ctx = ctx
+	return r2
+}
+```
+
+1. `NewReuqest`是封装了 `NewRequestWithContext`方法
+2. `NewRequestWithContext`方法组装 `Request`结构体内容，设置 `GetBody`方法
+3. `WithContext`则是创建一个新的 `Request`，设置 `ctx`并返回
