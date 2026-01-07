@@ -620,3 +620,77 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 1. `NewReuqest`是封装了 `NewRequestWithContext`方法
 2. `NewRequestWithContext`方法组装 `Request`结构体内容，设置 `GetBody`方法
 3. `WithContext`则是创建一个新的 `Request`，设置 `ctx`并返回
+
+## Transport
+
+```go
+type RoundTripper interface {
+    RoundTrip(*Request) (*Response, error)
+}
+
+type Transport struct {
+    // 1. 连接池管理
+    MaxIdleConns          int    // 全局最大空闲连接数
+    MaxIdleConnsPerHost   int    // 每个 Host（域名）最大空闲连接数（高并发关键！）
+    MaxConnsPerHost       int    // 每个域名同时存在的总连接数（包括正在用的 + 空闲的）上限
+    IdleConnTimeout       time.Duration // 空闲连接在池中多久没用就被关闭
+
+    // 2. 超时与拨号控制
+    DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+  
+    // 3. 安全与代理
+    TLSClientConfig    *tls.Config // TLS 握手配置（跳过证书验证等）
+    Proxy              func(*Request) (*url.URL, error) // 代理设置
+
+    // 4. HTTP/2 强制开启/关闭
+    ForceAttemptHTTP2  bool
+}
+```
+
+1. 可指定网卡
+
+   ```go
+   transport := &http.Transport{
+       DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+           localAddr, _ := net.ResolveTCPAddr("tcp", "192.168.1.10:0") // 本地 IP
+           d := net.Dialer{
+               LocalAddr: localAddr,
+               Timeout:   30 * time.Second,
+           }
+           return d.DialContext(ctx, network, addr)
+       },
+   }
+   ```
+2. 调整TCP
+
+   ```go
+   DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+       d := net.Dialer{Timeout: 30 * time.Second}
+       conn, err := d.DialContext(ctx, network, addr)
+       if err != nil {
+           return nil, err
+       }
+
+       // 这里的 conn 实际上是 *net.TCPConn
+       if tcpConn, ok := conn.(*net.TCPConn); ok {
+           // 比如：设置读写缓冲区
+           tcpConn.SetReadBuffer(1024 * 64)
+           tcpConn.SetWriteBuffer(1024 * 64)
+       }
+       return conn, nil
+   },
+   ```
+3. 代理
+
+   ```go
+   transport := &http.Transport{
+       Proxy: func(req *http.Request) (*url.URL, error) {
+           // 比如：只有访问外部域名时才用代理
+           if strings.Contains(req.URL.Host, "internal.com") {
+               return nil, nil // 返回 nil 表示不使用代理，直接连接
+           }
+
+           return url.Parse("http://proxy-server:3128")
+       },
+   }
+   ```
