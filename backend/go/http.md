@@ -419,59 +419,80 @@ type Client struct {
 var DefaultClient = &Client{}
 
 // 简化
-func (c *Client) Do(req *Request) (*Response, error) {
-    // 1. 基础检查
-    if req.URL == nil {
-        return nil, errors.New("http: nil Request.URL")
-    }
+func (c *Client) do(req *Request) (retres *Response, reterr error) {
+    // 1. 防御性编程：如果 c 为 nil 立即 panic，避免后续深层报错
+    _ = *c 
 
     var (
-        deadline      time.Time
-        didTimeout    func() bool
+        deadline      = c.deadline()
+        reqs          []*Request      // 记录重定向历史，用于 checkRedirect 校验
         resp          *Response
-        err           error
-        // ... 其他状态变量
+        copyHeaders   = c.makeHeadersCopier(req) // 准备 Header 复制器
+        includeBody   = true          // 是否继续携带 Body (重定向后可能变为 false)
     )
 
-    // 2. 超时处理：计算截止时间
-    deadline = c.deadline() // 根据 c.Timeout 计算
-
     for {
-        // 3. 准备当前请求：注入 Cookie
-        if c.Jar != nil {
-            for _, cookie := range c.Jar.Cookies(req.URL) {
-                req.AddCookie(cookie)
+        // --- A. 处理重定向逻辑 (非首次循环进入) ---
+        if len(reqs) > 0 {
+            loc := resp.Header.Get("Location")
+            if loc == "" { return resp, nil } // 3xx 但没给地址，直接返回
+
+            u, _ := req.URL.Parse(loc) // 解析新地址
+        
+            // 构造“下一跳”的新请求
+            ireq := reqs[0] // 原始请求
+            req = &Request{
+                Method:   redirectMethod, // 可能由 POST 变为 GET
+                URL:      u,
+                Header:   make(Header),
+                ctx:      ireq.ctx,       // 保持 Context 传递
             }
+
+            // 如果需要带 Body (如 307/308 且有 GetBody 方法)
+            if includeBody && ireq.GetBody != nil {
+                req.Body, _ = ireq.GetBody()
+            }
+
+            // 安全性：如果是跨域重定向，敏感 Header（如 Cookie/Auth）会被剥离
+            copyHeaders(req, stripSensitiveHeaders)
+
+            // 执行用户自定义的重定向策略（比如限制最多 10 次）
+            if err := c.checkRedirect(req, reqs); err != nil {
+                return resp, err 
+            }
+
+            // 为了复用 TCP 连接：如果响应体很小，把它读完丢弃比直接关闭更划算
+            const maxBodySlurpSize = 2048
+            if resp.ContentLength <= maxBodySlurpSize {
+                io.CopyN(io.Discard, resp.Body, maxBodySlurpSize)
+            }
+            resp.Body.Close() // 必须关闭旧的响应体
         }
 
-        // 4. 发送请求：核心调用 Transport.RoundTrip
-        resp, didTimeout, err = c.send(req, deadline)
-        if err != nil {
+        // --- B. 发送网络请求 ---
+        reqs = append(reqs, req)
+        var err error
+        // c.send 是底层的核心，它真正调用 RoundTripper (Transport)
+        if resp, _, err = c.send(req, deadline); err != nil {
             return nil, err
         }
 
-	if c.Jar != nil {
-		if rc := resp.Cookies(); len(rc) > 0 {
-			c.Jar.SetCookies(req.URL, rc)
-		}
-	}
-
-        // 5. 处理重定向
-        redirectMethod, shouldRedirect, includeBody := redirectBehavior(req.Method, resp, req)
+        // --- C. 判断是否需要重定向 ---
+        var shouldRedirect bool
+        // 核心工具函数：根据状态码 (301, 302, 307...) 决定下一步行为
+        redirectMethod, shouldRedirect, _ = redirectBehavior(req.Method, resp, reqs[0])
+    
         if !shouldRedirect {
-            return resp, nil // 不需要重定向，直接返回响应
+            return resp, nil // 正常响应 (2xx/4xx/5xx)，大功告成
         }
 
-        // 6. 检查重定向次数 (默认上限 10 次)
-        if len(reqs) >= 10 {
-            return nil, errors.New("http: too many redirects")
-        }
-
-        // 7. 更新请求对象，准备进入下一次循环
-        req = nextRequest // 构造重定向后的新请求
+        // 准备进行下一次循环（重定向）
+        req.closeBody()
     }
 }
 ```
+
+在 HTTP/1.1 中，如果你想 **复用** （Reuse）同一个 TCP 连接发送下一个请求（Keep-Alive），你必须保证前一个请求的响应体已经被 **完全读取完毕** ，**如果不读完直接 Close** ：底层的 TCP 连接会因为还有残留数据没处理，而被强制关闭并丢弃
 
 其他方法比如 `Get`、`Post`和 `PostForm`都是对 `Do`的封装调用
 
