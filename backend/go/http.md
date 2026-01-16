@@ -416,6 +416,18 @@ type Client struct {
     Timeout time.Duration
 }
 
+type CookieJar interface {
+	// SetCookies handles the receipt of the cookies in a reply for the
+	// given URL.  It may or may not choose to save the cookies, depending
+	// on the jar's policy and implementation.
+	SetCookies(u *url.URL, cookies []*Cookie)
+
+	// Cookies returns the cookies to send in a request for the given URL.
+	// It is up to the implementation to honor the standard cookie use
+	// restrictions such as in RFC 6265.
+	Cookies(u *url.URL) []*Cookie
+}
+
 var DefaultClient = &Client{}
 
 // 简化
@@ -424,7 +436,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
     _ = *c 
 
     var (
-        deadline      = c.deadline()
+        deadline      = time.Now().Add(c.Timeout)
         reqs          []*Request      // 记录重定向历史，用于 checkRedirect 校验
         resp          *Response
         copyHeaders   = c.makeHeadersCopier(req) // 准备 Header 复制器
@@ -438,7 +450,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
             if loc == "" { return resp, nil } // 3xx 但没给地址，直接返回
 
             u, _ := req.URL.Parse(loc) // 解析新地址
-        
+  
             // 构造“下一跳”的新请求
             ireq := reqs[0] // 原始请求
             req = &Request{
@@ -457,9 +469,12 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
             copyHeaders(req, stripSensitiveHeaders)
 
             // 执行用户自定义的重定向策略（比如限制最多 10 次）
-            if err := c.checkRedirect(req, reqs); err != nil {
-                return resp, err 
-            }
+            err := c.checkRedirect(req, reqs)
+	  
+   	    if err == ErrUseLastResponse {
+		return resp, nil // 不能先关闭Body，否则后续拿不到
+	    }
+  
 
             // 为了复用 TCP 连接：如果响应体很小，把它读完丢弃比直接关闭更划算
             const maxBodySlurpSize = 2048
@@ -467,6 +482,13 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
                 io.CopyN(io.Discard, resp.Body, maxBodySlurpSize)
             }
             resp.Body.Close() // 必须关闭旧的响应体
+
+	    if err != nil {
+		// The resp.Body has already been closed.
+		ue := uerr(err)
+		ue.(*url.Error).URL = loc
+		return resp, ue
+	     }
         }
 
         // --- B. 发送网络请求 ---
@@ -481,7 +503,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
         var shouldRedirect bool
         // 核心工具函数：根据状态码 (301, 302, 307...) 决定下一步行为
         redirectMethod, shouldRedirect, _ = redirectBehavior(req.Method, resp, reqs[0])
-    
+  
         if !shouldRedirect {
             return resp, nil // 正常响应 (2xx/4xx/5xx)，大功告成
         }
@@ -490,9 +512,55 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
         req.closeBody()
     }
 }
+
+func (c *Client) send(req *Request, deadline time.Time) (resp *Response, didTimeout func() bool, err error) {
+	if c.Jar != nil { // 也就说Jar存储了Client实例所有发出请求中收到响应体中携带的cookies，按url区分
+		for _, cookie := range c.Jar.Cookies(req.URL) {
+			req.AddCookie(cookie)
+		}
+	}
+	resp, didTimeout, err = send(req, c.transport(), deadline)
+	if err != nil {
+		return nil, didTimeout, err
+	}
+	if c.Jar != nil {
+		if rc := resp.Cookies(); len(rc) > 0 {
+			c.Jar.SetCookies(req.URL, rc)
+		}
+	}
+	return resp, nil, nil
+}
 ```
 
 在 HTTP/1.1 中，如果你想 **复用** （Reuse）同一个 TCP 连接发送下一个请求（Keep-Alive），你必须保证前一个请求的响应体已经被 **完全读取完毕** ，**如果不读完直接 Close** ：底层的 TCP 连接会因为还有残留数据没处理，而被强制关闭并丢弃
+
+对于 `Timeout`，最后会通过 `WithDealineContext`存储在req.ctx中
+
+```go
+req.ctx, cancelCtx = context.WithDeadline(oldCtx, deadline)
+// ...
+if !deadline.IsZero() {
+	resp.Body = &cancelTimerBody{
+		stop:          cancelCtx,
+		rc:            resp.Body,
+		reqDidTimeout: func() bool { return time.Now().After(deadline) },
+	}
+}
+
+func (b *cancelTimerBody) Read(p []byte) (n int, err error) {
+	n, err = b.rc.Read(p)
+	if err == nil {
+		return n, nil
+	}
+	if err == io.EOF {
+		return n, err
+	}
+	if b.reqDidTimeout() { // 所以Timeout超时是从请求发出到响应体Body读取完不能超过Timeout
+		err = &timeoutError{err.Error() + " (Client.Timeout or context cancellation while reading body)"}
+	}
+	return n, err
+}
+```
 
 其他方法比如 `Get`、`Post`和 `PostForm`都是对 `Do`的封装调用
 
