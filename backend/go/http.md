@@ -659,7 +659,7 @@ func NewRequestWithContext(ctx context.Context, method, url string, body io.Read
 			}
 		case *bytes.Reader:
 			req.ContentLength = int64(v.Len())
-			snapshot := *v
+			snapshot := *v // 结构体浅copy，offset一直为0
 			req.GetBody = func() (io.ReadCloser, error) {
 				r := snapshot
 				return io.NopCloser(&r), nil
@@ -707,8 +707,9 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 ```
 
 1. `NewReuqest`是封装了 `NewRequestWithContext`方法
-2. `NewRequestWithContext`方法组装 `Request`结构体内容，设置 `GetBody`方法
-3. `WithContext`则是创建一个新的 `Request`，设置 `ctx`并返回
+2. 如 `strings.NewReader` 或 `bytes.NewBuffer`，它们只实现了 `io.Reader`（只有 `Read`），没有 `Close` 方法，所以用 `io.NopCloser` 注入一个**空的 `Close` 方法**
+3. `NewRequestWithContext`方法组装 `Request`结构体内容，设置 `GetBody`方法，`GetBody` 的存在是为了解决“重定向”或“重试”时的 Body 复用问题
+4. `WithContext`则是创建一个新的 `Request`，设置 `ctx`并返回
 
 ## Transport
 
