@@ -720,67 +720,263 @@ type RoundTripper interface {
 
 type Transport struct {
     // 1. 连接池管理
-    MaxIdleConns          int    // 全局最大空闲连接数
-    MaxIdleConnsPerHost   int    // 每个 Host（域名）最大空闲连接数（高并发关键！）
-    MaxConnsPerHost       int    // 每个域名同时存在的总连接数（包括正在用的 + 空闲的）上限
-    IdleConnTimeout       time.Duration // 空闲连接在池中多久没用就被关闭
+    MaxIdleConns int
+    IdleConnTimeout time.Duration
+    idleConn     map[connectMethodKey][]*persistConn // most recently used at end
+    idleConnWait map[connectMethodKey]wantConnQueue  // waiting getConns
+    idleLRU      connLRU
 
-    // 2. 超时与拨号控制
-    DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+    MaxIdleConnsPerHost int
+    MaxConnsPerHost int
+    connsPerHostMu   sync.Mutex
+    connsPerHost     map[connectMethodKey]int
+    connsPerHostWait map[connectMethodKey]wantConnQueue // waiting getConns
+   
   
-    // 3. 安全与代理
-    TLSClientConfig    *tls.Config // TLS 握手配置（跳过证书验证等）
-    Proxy              func(*Request) (*url.URL, error) // 代理设置
+    DisableKeepAlives bool
+    DisableCompression bool
 
-    // 4. HTTP/2 强制开启/关闭
-    ForceAttemptHTTP2  bool
+    MaxResponseHeaderBytes int64
+    ResponseHeaderTimeout time.Duration
+
+    // 拨号控制
+    DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 ```
 
-1. 可指定网卡
+### 连接池
 
-   ```go
-   transport := &http.Transport{
-       DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-           localAddr, _ := net.ResolveTCPAddr("tcp", "192.168.1.10:0") // 本地 IP
-           d := net.Dialer{
-               LocalAddr: localAddr,
-               Timeout:   30 * time.Second,
-           }
-           return d.DialContext(ctx, network, addr)
-       },
-   }
-   ```
-2. 调整TCP
+```go
+func GetConn() {
+	w := &wantConn{
+		cm:         cm,
+		key:        cm.key(),
+		ctx:        dialCtx,
+		cancelCtx:  dialCancel,
+		result:     make(chan connOrError, 1),
+		beforeDial: testHookPrePendingDial,
+		afterDial:  testHookPostPendingDial,
+	}
+  	// Queue for idle connection.
+	if delivered := t.queueForIdleConn(w); !delivered {
+		t.queueForDial(w)
+	}
+}
 
-   ```go
-   DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-       d := net.Dialer{Timeout: 30 * time.Second}
-       conn, err := d.DialContext(ctx, network, addr)
-       if err != nil {
-           return nil, err
-       }
+func (t *Transport) queueForIdleConn(w *wantConn) (delivered bool) {
+	if t.DisableKeepAlives { // 没开启keep alive则直接返回false，不允许复用连接
+		return false
+	}
 
-       // 这里的 conn 实际上是 *net.TCPConn
-       if tcpConn, ok := conn.(*net.TCPConn); ok {
-           // 比如：设置读写缓冲区
-           tcpConn.SetReadBuffer(1024 * 64)
-           tcpConn.SetWriteBuffer(1024 * 64)
-       }
-       return conn, nil
-   },
-   ```
-3. 代理
+	t.idleMu.Lock() // 加锁，只允许一个goroutine去修改idleConn等字段
+	defer t.idleMu.Unlock()
 
-   ```go
-   transport := &http.Transport{
-       Proxy: func(req *http.Request) (*url.URL, error) {
-           // 比如：只有访问外部域名时才用代理
-           if strings.Contains(req.URL.Host, "internal.com") {
-               return nil, nil // 返回 nil 表示不使用代理，直接连接
-           }
+	t.closeIdle = false
+	var oldTime time.Time
+	if t.IdleConnTimeout > 0 {
+		oldTime = time.Now().Add(-t.IdleConnTimeout)
+	}
 
-           return url.Parse("http://proxy-server:3128")
-       },
-   }
-   ```
+	if list, ok := t.idleConn[w.key]; ok { // 根据scheme、url组成的str去获取对应的空闲队列，从而复用连接（这样被连接方的tcp都是不变的）
+		stop := false
+		delivered := false
+		for len(list) > 0 && !stop {
+			pconn := list[len(list)-1]
+
+			tooOld := !oldTime.IsZero() && pconn.idleAt.Round(0).Before(oldTime)
+			if tooOld {
+				go pconn.closeConnIfStillIdle()
+			}
+			if pconn.isBroken() || tooOld { // 连接太老或者坏了就需要移除
+				list = list[:len(list)-1]
+				continue
+			}
+			delivered = w.tryDeliver(pconn, nil, pconn.idleAt) // 尝试请求，如果当前请求已经完成了就返回false（比如其他情况抢先把请求完成）
+			if delivered {
+				if pconn.alt != nil { // h2可共享连接，不需要移除
+					// HTTP/2: multiple clients can share pconn.
+					// Leave it in the list.
+				} else { // h1独占连接，需要移除避免给其他连接复用
+					// HTTP/1: only one client can use pconn.
+					// Remove it from the list.
+					t.idleLRU.remove(pconn)
+					list = list[:len(list)-1]
+				}
+			}
+			stop = true
+		}
+		if len(list) > 0 {
+			t.idleConn[w.key] = list
+		} else {
+			delete(t.idleConn, w.key)
+		}
+		if stop {
+			return delivered
+		}
+	}
+
+	// Register to receive next connection that becomes idle.
+	if t.idleConnWait == nil {
+		t.idleConnWait = make(map[connectMethodKey]wantConnQueue)
+	}
+	q := t.idleConnWait[w.key]
+	q.cleanFrontNotWaiting()
+	q.pushBack(w) // 没获取到就放入等待队列
+	t.idleConnWait[w.key] = q
+	return false // 返回false，尝试
+}
+
+func (t *Transport) queueForDial(w *wantConn) {
+	w.beforeDial()
+
+	t.connsPerHostMu.Lock()
+	defer t.connsPerHostMu.Unlock()
+
+	if t.MaxConnsPerHost <= 0 {
+		t.startDialConnForLocked(w)
+		return
+	}
+
+	if n := t.connsPerHost[w.key]; n < t.MaxConnsPerHost { // 如果没超过限制就开始拨号，不等空闲连接
+		if t.connsPerHost == nil {
+			t.connsPerHost = make(map[connectMethodKey]int)
+		}
+		t.connsPerHost[w.key] = n + 1
+		t.startDialConnForLocked(w)
+		return
+	}
+
+	if t.connsPerHostWait == nil {
+		t.connsPerHostWait = make(map[connectMethodKey]wantConnQueue)
+	}
+	q := t.connsPerHostWait[w.key]
+	q.cleanFrontNotWaiting()
+	q.pushBack(w)
+	t.connsPerHostWait[w.key] = q
+}
+
+func (t *Transport) tryPutIdleConn(pconn *persistConn) error {
+	if t.DisableKeepAlives || t.MaxIdleConnsPerHost < 0 { // 没开启或者MaxIdleConnsPerHost小于0，就不考虑连接复用
+		return errKeepAlivesDisabled
+	}
+	if pconn.isBroken() {
+		return errConnBroken
+	}
+	pconn.markReused()
+
+	t.idleMu.Lock()
+	defer t.idleMu.Unlock()
+
+	if pconn.alt != nil && t.idleLRU.m[pconn] != nil {
+		return nil
+	}
+
+	key := pconn.cacheKey
+	if q, ok := t.idleConnWait[key]; ok { // 从等待空闲连接中取请求
+		done := false
+		if pconn.alt == nil {
+			// HTTP/1.
+			// Loop over the waiting list until we find a w that isn't done already, and hand it pconn.
+			for q.len() > 0 {
+				w := q.popFront()
+				if w.tryDeliver(pconn, nil, time.Time{}) {
+					done = true
+					break
+				}
+			}
+		} else {
+			// HTTP/2.
+			// 连接可以复用，不需要跳出
+			for q.len() > 0 {
+				w := q.popFront()
+				w.tryDeliver(pconn, nil, time.Time{})
+			}
+		}
+		if q.len() == 0 {
+			delete(t.idleConnWait, key)
+		} else {
+			t.idleConnWait[key] = q
+		}
+		if done {
+			return nil
+		}
+	}
+
+	if t.closeIdle {
+		return errCloseIdle
+	}
+	if t.idleConn == nil {
+		t.idleConn = make(map[connectMethodKey][]*persistConn)
+	}
+	idles := t.idleConn[key]
+	if len(idles) >= t.maxIdleConnsPerHost() {
+		return errTooManyIdleHost
+	}
+	for _, exist := range idles {
+		if exist == pconn {
+			log.Fatalf("dup idle pconn %p in freelist", pconn)
+		}
+	}
+	t.idleConn[key] = append(idles, pconn)
+	t.idleLRU.add(pconn) // idleLRU管理整个空闲连接，剔除 MaxIdleConns 的数量
+	if t.MaxIdleConns != 0 && t.idleLRU.len() > t.MaxIdleConns {
+		oldest := t.idleLRU.removeOldest()
+		oldest.close(errTooManyIdle)
+		t.removeIdleConnLocked(oldest)
+	}
+
+	if t.IdleConnTimeout > 0 && pconn.alt == nil {
+		if pconn.idleTimer != nil {
+			pconn.idleTimer.Reset(t.IdleConnTimeout)
+		} else {
+			pconn.idleTimer = time.AfterFunc(t.IdleConnTimeout, pconn.closeConnIfStillIdle)
+		}
+	}
+	pconn.idleAt = time.Now()
+	return nil
+}
+
+func (t *Transport) decConnsPerHost(key connectMethodKey) {
+	if t.MaxConnsPerHost <= 0 {
+		return
+	}
+
+	t.connsPerHostMu.Lock()
+	defer t.connsPerHostMu.Unlock()
+	n := t.connsPerHost[key]
+	if n == 0 {
+		panic("net/http: internal error: connCount underflow")
+	}
+
+	if q := t.connsPerHostWait[key]; q.len() > 0 { // 减少连接数量，也就意味着在等待去请求新连接的请求可以发起连接了
+		done := false
+		for q.len() > 0 {
+			w := q.popFront()
+			if w.waiting() {
+				t.startDialConnForLocked(w)
+				done = true
+				break
+			}
+		}
+		if q.len() == 0 {
+			delete(t.connsPerHostWait, key)
+		} else {
+			// q is a value (like a slice), so we have to store
+			// the updated q back into the map.
+			t.connsPerHostWait[key] = q
+		}
+		if done {
+			return
+		}
+	}
+
+	// Otherwise, decrement the recorded count.
+	if n--; n == 0 {
+		delete(t.connsPerHost, key)
+	} else {
+		t.connsPerHost[key] = n
+	}
+}
+```
+
+`tryPutIdleConn` 是在连接“工作完想休息”时调用的，而 `decConnsPerHost` 是在连接“彻底报废”时调用的
