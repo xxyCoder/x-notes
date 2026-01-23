@@ -200,7 +200,7 @@ func setDeadlineImpl(fd *FD, t time.Time, mode int) error {
 }
 ```
 
-1. 超时不是由操作系统内核（如 `SO_RCVTIMEO`）处理的，而是由 Go Runtime 自己维护的一套定时器机制。这样做的好处是 **极致的性能** ——在 Linux 下，不需要频繁地进行 `setsockopt` 系统调用
+1. 超时不是由操作系统内核（如 `SO_RCVTIMEO`）处理的，而是由 Go Runtime 自己维护的一套定时器机制，因为非阻塞下，Read调用要么拿到数据，要么返回错误表示内核没数据，不会在内核逗留
 2. 因为系统调用（如 `setsockopt`）是针对线程的。而 Go 的目标是在一个线程上运行成千上万个协程。如果使用内核的 `SO_RCVTIMEO`，当超时发生时，整个线程会被阻塞或接收信号。通过在 `runtime` 层实现超时，Go 可以精准地只唤醒那一个过期的协程
 
 #### Keep Alive
