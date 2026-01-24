@@ -265,6 +265,67 @@ $$
 
 如果你的 TCP 窗口（缓冲区）比 BDP 小，那么在“确认信号（ACK）”从对方传回你这里之前，你已经把窗口发满了，不得不停下来等。这时，水管就是空的，带宽被白白浪费了，自动调优的目标就是让缓冲区大小始终**略大于或等于**当前的 BDP
 
+## Listener
+
+```go
+type Listener interface {
+	// Accept waits for and returns the next connection to the listener.
+	Accept() (Conn, error)
+
+	// Close closes the listener.
+	// Any blocked Accept operations will be unblocked and return errors.
+	Close() error
+
+	// Addr returns the listener's network address.
+	Addr() Addr
+}
+
+type ListenConfig struct {
+	Control func(network, address string, c syscall.RawConn) error
+
+	KeepAlive time.Duration
+
+	KeepAliveConfig KeepAliveConfig
+}
+
+func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (Listener, error) {
+	addrs, err := DefaultResolver.resolveAddrList(ctx, "listen", network, address, nil)
+	if err != nil {
+		return nil, &OpError{Op: "listen", Net: network, Source: nil, Addr: nil, Err: err}
+	}
+	sl := &sysListener{
+		ListenConfig: *lc,
+		network:      network,
+		address:      address,
+	}
+	var l Listener
+	la := addrs.first(isIPv4)
+	switch la := la.(type) {
+	case *TCPAddr:
+		if sl.MultipathTCP() {
+			l, err = sl.listenMPTCP(ctx, la)
+		} else {
+			l, err = sl.listenTCP(ctx, la)
+		}
+	}
+	if err != nil {
+		return nil, &OpError{Op: "listen", Net: sl.network, Source: nil, Addr: la, Err: err} // l is non-nil interface containing nil pointer
+	}
+	return l, nil
+}
+
+func (sl *sysListener) listenTCP(ctx context.Context, laddr *TCPAddr) (*TCPListener, error) {
+    // 关键点 1：创建底层 netFD
+    // 调用Bind 连接sock和sockaddr
+    // 调用ListenFunc见监听套接字
+    fd, err := internetSocket(ctx, sl.network, laddr, nil, syscall.SOCK_STREAM, 0, "listen", sl.ListenConfig.Control)
+    if err != nil {
+        return nil, err
+    }
+    return &TCPListener{fd: fd}, nil
+}
+```
+
 ## Dialer
 
 ```go
