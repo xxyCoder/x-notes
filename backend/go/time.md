@@ -12,6 +12,50 @@ type Time struct {
 
 `ext`  **单调时钟** 存储程序启动后的完整的纳秒数，**非单调时钟** 存储距离 **公元元年1月1日**的完整秒数
 
+### 函数
+
+```go
+unixToInternal int64 = (1969*365 + 1969/4 - 1969/100 + 1969/400) * secondsPerDay
+
+func Now() Time {
+	sec, nsec, mono := runtimeNow() // 距离 UTC 1970年1月1日 00:00:00 的秒数/纳秒偏移量/代表系统启动（开机）以来的纳秒数
+	if mono == 0 { // 不支持单调时钟
+		return Time{uint64(nsec), sec + unixToInternal, Local}
+	}
+	mono -= startNano
+	sec += unixToInternal - minWall
+	if uint64(sec)>>33 != 0 {
+		// Seconds field overflowed the 33 bits available when
+		// storing a monotonic time. This will be true after
+		// March 16, 2157.
+		return Time{uint64(nsec), sec + minWall, Local}
+	}
+	return Time{hasMonotonic | uint64(sec)<<nsecShift | uint64(nsec), mono, Local}
+}
+```
+
+1. `runtimeNow`不会陷入内核，而是从只读内存 vDSO 读取（由内核进行校准）
+2. Unix是从1970年开始计数，go选择从公元元年(Year 1)开始计数，故而需要加 `unixToInternal`（从公元1年 到 1970年 之间总共的秒数）
+3. `startNano` 是Go 进程启动时刻的系统单调时钟值，`minWall` 是从 **公元元年 (0001-01-01)** 到 **1885年1月1日** 之间的总秒数
+
+```go
+func Unix(sec int64, nsec int64) Time {
+	if nsec < 0 || nsec >= 1e9 {
+		n := nsec / 1e9
+		sec += n
+		nsec -= n * 1e9
+		if nsec < 0 {
+			nsec += 1e9
+			sec--
+		}
+	}
+	return Time{uint64(nsec), sec + unixToInternal, Local}
+}
+```
+
+1. 传递自1970年1月1日UTC起的秒数和纳秒数
+
+
 ## Location
 
 ```go
