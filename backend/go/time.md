@@ -55,7 +55,6 @@ func Unix(sec int64, nsec int64) Time {
 
 1. 传递自1970年1月1日UTC起的秒数和纳秒数
 
-
 ## Location
 
 ```go
@@ -141,3 +140,36 @@ type Duration int64
 单位固定是 **纳秒**
 
 不考虑使用 uint64 是因为时间也会设计加减，如果小时间减大时间，可以表示相差多少，但是如果用 uint64 就无法正确表示
+
+## Ticker
+
+```go
+type Ticker struct {
+	C          <-chan Time // The channel on which the ticks are delivered.
+	initTicker bool
+}
+
+func NewTicker(d Duration) *Ticker {
+	if d <= 0 {
+		panic("non-positive interval for NewTicker")
+	}
+	// Give the channel a 1-element time buffer.
+	// If the client falls behind while reading, we drop ticks
+	// on the floor until the client catches up.
+	c := make(chan Time, 1)
+	t := (*Ticker)(unsafe.Pointer(newTimer(when(d), int64(d), sendTime, c, syncTimer(c))))
+	t.C = c
+	return t
+}
+
+func sendTime(c any, seq uintptr, delta int64) {
+	select {
+	case c.(chan Time) <- Now().Add(Duration(-delta)):
+	default:
+	}
+}
+```
+
+1. 如果通道是无缓冲的（buffer 0），当时间到了，Runtime 尝试往 `c` 发送时间，如果用户代码没有正在 `<-c` 等待，Runtime 就会被阻塞住
+2. 实现了“ **如果用户没来得及取走上次的 Tick，这次的 Tick 就直接丢弃** ”的效果
+3. `send` 是回调函数。当时间到了，Runtime 会调用这个函数把当前时间发给通道 `c`
