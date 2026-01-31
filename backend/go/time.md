@@ -173,3 +173,17 @@ func sendTime(c any, seq uintptr, delta int64) {
 1. 如果通道是无缓冲的（buffer 0），当时间到了，Runtime 尝试往 `c` 发送时间，如果用户代码没有正在 `<-c` 等待，Runtime 就会被阻塞住
 2. 实现了“ **如果用户没来得及取走上次的 Tick，这次的 Tick 就直接丢弃** ”的效果
 3. `send` 是回调函数。当时间到了，Runtime 会调用这个函数把当前时间发给通道 `c`
+
+## Timer
+
+```go
+type Timer struct {
+	C         <-chan Time
+	initTimer bool
+}
+```
+
+timer是一个一次性定时器，只会往这里面发送**一次**当前时间。发送完毕后，如果不重置，这个通道就再也不会有数据了
+
+另外：所有定时器（Timer/Ticker）创建后，都会被注册到 **Go Runtime 的全局时间堆** 中。
+ **即使用户代码不再引用它，Runtime 依然持有它的指针以维持计时** 。因此，除非显式停止或自然到期，GC 永远视为“正在使用”而无法回收
