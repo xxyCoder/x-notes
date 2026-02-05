@@ -182,3 +182,84 @@ func (m *Mutex) unlockSlow(new int32) {
 当调用 `Unlock()` 时，首先尝试  **Fast Path** ，通过 `atomic.AddInt32` 移除 `mutexLocked` 标志。如果结果为 0，说明没有等待者，直接返回；如果结果不为 0，进入 `unlockSlow`。
 
 在 **正常模式** 下，代码会通过 `for` 循环（确保锁的状态被更新成功，有goroutine被唤醒并且等待数量减1，因为锁是乐观锁所以需要循环重试）检查是否有必要唤醒等待者（若已有其他协程在抢锁或已加锁，则直接返回），确定需要唤醒时，通过 CAS 减少等待计数并设置 `mutexWoken` 标志，最后调用 `runtime_Semrelease(handoff=false)` 唤醒一个等待者让其参与竞争；而在 **饥饿模式** 下，逻辑极其简单，直接调用 `runtime_Semrelease(handoff=true)` 将锁的所有权 **定点移交** 给等待队列头部的协程，期间不修改 `mutexLocked` 位（由接收者修正）
+
+## RWMutex
+
+```go
+type RWMutex struct {
+	w           Mutex        // held if there are pending writers
+	writerSem   uint32       // semaphore for writers to wait for completing readers
+	readerSem   uint32       // semaphore for readers to wait for completing writers
+	readerCount atomic.Int32 // number of pending readers
+	readerWait  atomic.Int32 // number of departing readers
+}
+
+const rwmutexMaxReaders = 1 << 30
+```
+
+允许多个读协程同时访问，但写协程必须独占访问
+
+`readerCount` 正数表示当前有 `n` 个读协程持有锁，当写协程要抢锁时，它不会把 `readerCount` 变成 -1，而是减去 `rwmutexMaxReaders` (1<<30)，这样后续有新的读请求可以直接进行累加，后续写请求结束，只需要把 `rwmutexMaxReaders`加回去即可
+
+`readerWait` 当写协程抢到 `w` 锁，并将 `readerCount` 变负（宣示主权）时，可能还有一些**旧的读者**还没读完，写协程会把当时的读者数量复制到 `readerWait` 中，走一个旧读者，`readerWait` 减 1。当减到 0 时，说明路清空了，唤醒写协程
+
+`writerSem`和 `readerSem`用于挂起（休眠）和唤醒协程
+
+### 读锁
+
+```go
+func (rw *RWMutex) RLock() {
+	if rw.readerCount.Add(1) < 0 {
+		// A writer is pending, wait for it.
+		runtime_SemacquireRWMutexR(&rw.readerSem, false, 0)
+	}
+}
+
+func (rw *RWMutex) RUnlock() {
+	if r := rw.readerCount.Add(-1); r < 0 {
+		// Outlined slow-path to allow the fast-path to be inlined
+		rw.rUnlockSlow(r)
+	}
+}
+
+func (rw *RWMutex) rUnlockSlow(r int32) {
+	// A writer is pending.
+	if rw.readerWait.Add(-1) == 0 {
+		// The last reader unblocks the writer.
+		// 最后一个读请求，唤醒写请求
+		runtime_Semrelease(&rw.writerSem, false, 1)
+	}
+}
+```
+
+### 写锁
+
+```go
+func (rw *RWMutex) Lock() {
+	// First, resolve competition with other writers.
+	rw.w.Lock()
+	// Announce to readers there is a pending writer.
+	r := rw.readerCount.Add(-rwmutexMaxReaders) + rwmutexMaxReaders
+	// Wait for active readers.
+	if r != 0 && rw.readerWait.Add(r) != 0 {
+		runtime_SemacquireRWMutex(&rw.writerSem, false, 0)
+	}
+}
+
+func (rw *RWMutex) Unlock() {
+	// Announce to readers there is no active writer.
+	r := rw.readerCount.Add(rwmutexMaxReaders)
+	if r >= rwmutexMaxReaders {
+		race.Enable()
+		fatal("sync: Unlock of unlocked RWMutex")
+	}
+	// Unblock blocked readers, if any.
+	for i := 0; i < int(r); i++ {
+		runtime_Semrelease(&rw.readerSem, false, 0)
+	}
+	// Allow other writers to proceed.
+	rw.w.Unlock()
+}
+```
+
+先抢互斥锁（其他写请求要抢就需要排队）
