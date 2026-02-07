@@ -263,3 +263,169 @@ func (rw *RWMutex) Unlock() {
 ```
 
 先抢互斥锁（其他写请求要抢就需要排队）
+
+## Cond
+
+```go
+type Locker interface {
+    Lock()
+    Unlock()
+}
+
+type Cond struct {
+    // L 是在观察或更改条件时必须持有的锁
+    L Locker
+
+    notify  notifyList
+}
+
+type notifyList struct {
+    wait   uint32
+    notify uint32
+    lock   uintptr // key field of the mutex
+    head   unsafe.Pointer
+    tail   unsafe.Pointer
+}
+```
+
+`notify` 存储了所有正在调用 `Wait()` 等待被唤醒的 `Goroutine`
+
+```go
+func NewCond(l Locker) *Cond {
+	return &Cond{L: l}
+}
+
+func (c *Cond) Wait() {
+	// 注册等待队列，拿到一个 ticket
+	t := runtime_notifyListAdd(&c.notify)
+	// 释放锁
+	c.L.Unlock()
+	// 挂起当前 goroutine，让出cpu
+	runtime_notifyListWait(&c.notify, t)
+	// 被唤醒后拿到锁
+	c.L.Lock()
+}
+
+func (c *Cond) Signal() {
+    // 唤醒队列中等待的 goroutine
+    runtime_notifyListNotifyOne(&c.notify)
+}
+
+// Broadcast wakes all goroutines waiting on c.
+//
+// It is allowed but not required for the caller to hold c.L
+// during the call.
+func (c *Cond) Broadcast() {
+	// 叫醒所有 goroutine
+    runtime_notifyListNotifyAll(&c.notify)
+}
+```
+
+## WaitGroup
+
+```go
+type WaitGroup struct {
+	// Bits (high to low):
+	//   bits[0:32]  counter
+	//   bits[33:64] wait count
+	state atomic.Uint64
+	sema  uint32
+}
+```
+
+1. `counter` 记录有多少个调用了Add方法还是没有调用Done方法的任务
+2. `wait` 记录了有多少个 goroutine 正在wait
+
+```go
+func (wg *WaitGroup) Add(delta int) {
+    // 1. 更新计数器 (Counter)
+    // 将 delta 左移 32 位，加到 state 的高 32 位上。
+    // state 的低 32 位 (Waiter) 保持不变。
+    state := wg.state.Add(uint64(delta) << 32)
+    
+    // 2. 拆解状态
+    v := int32(state >> 32)   // 高位：当前的 Counter (任务数)
+    w := uint32(state & 0x7fffffff) // 低位：当前的 Waiter (等待者数)
+    
+    // 3. 安全检查
+    // 计数器不能为负数 (Done 调多了)
+    if v < 0 {
+        panic("sync: negative WaitGroup counter")
+    }
+    
+    // 这一步检查非常关键：防止并发 Wait 和 Add 的误用
+    // 如果 waiters > 0 (有人在等)，且当前 delta > 0 (正在添加新任务)，
+    // 且 v == delta (说明这正是导致 counter 从 0 变成非 0 的那次 Add)，
+    // 这意味着：之前 Counter 已经是 0 了，有人开始 Wait 了，结果你又 Add 了新任务。
+    // WaitGroup 不允许在 Wait 开始后，Counter 归零前并发调用 Add。
+    if w != 0 && delta > 0 && v == int32(delta) {
+        panic("sync: WaitGroup misuse: Add called concurrently with Wait")
+    }
+    
+    // 4. 判断是否需要唤醒
+    // 如果任务还没做完 (v > 0)，或者根本没人等 (w == 0)，直接返回。
+    if v > 0 || w == 0 {
+        return
+    }
+    
+    // 5. 唤醒所有等待者
+    // 走到这里说明：v == 0 (任务做完了) 且 w > 0 (有人在等)。
+    
+    // 把 state 清零（Counter=0, Waiter=0），这是为了防御性编程，防止后续逻辑混乱
+    // 同时也是一种屏障。
+    wg.state.Store(0)
+    
+    // 循环 w 次，唤醒所有在 sema 上睡眠的 goroutine
+    for ; w != 0; w-- {
+        runtime_Semrelease(&wg.sema, false, 0)
+    }
+}
+
+func (wg *WaitGroup) Done() {
+    wg.Add(-1)
+}
+
+func (wg *WaitGroup) Wait() {
+    // 这是一个 CAS 循环，因为并发环境下 state 随时在变
+    for {
+        state := wg.state.Load()
+        v := int32(state >> 32)   // Counter
+        w := uint32(state & 0x7fffffff) // Waiter
+
+        // 1. Fast Path: 计数器已经是 0 了，不用等，直接走人
+        if v == 0 {
+            return
+        }
+
+        // 2. 准备睡觉：尝试把 Waiter 数量 + 1
+        // 使用 CAS 操作，如果 state 没被别人改过，就将低位 +1
+        if wg.state.CompareAndSwap(state, state+1) {
+            // 3. 真正的阻塞点
+            // 调用运行时信号量，挂起当前 goroutine。
+            // 直到 Add() 把 Counter 减为 0 时，通过 Semrelease 唤醒这里。
+            runtime_SemacquireWaitGroup(&wg.sema, synctestDurable)
+
+            // 4. 醒来后的检查
+            // 正常情况下，醒来时 state 已经被 Add() 重置为 0 了。
+            // 如果不是 0，说明 WaitGroup 被错误地复用了（即在前一组 Wait 还没完全返回时，又有人调用了 Add）。
+            if wg.state.Load() != 0 {
+                panic("sync: WaitGroup is reused before previous Wait has returned")
+			}
+			
+            return
+		}
+    }
+}
+
+func (wg *WaitGroup) Go(f func()) {
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        f()
+    }()
+}
+```
+
+1. 唤醒是在`Add`方法中实现的，而`Done`实际就是调用`Add`
+2. `Wait` 的核心逻辑是：检查计数器 -> 如果非零，记录我是等待者 -> 睡觉 -> 被唤醒
+3. `Go` 是官方给的补丁，避免忘记 `Add`或者是`Done`
