@@ -58,3 +58,95 @@ func nextslicecap(newLen, oldCap int) int {
 1. 先考虑双倍旧容量，如果比新长度要小则使用新长度
 2. 否则判断阈值（256），当旧容量小于阈值才可以使用翻倍值作为新容量
 3. 大于等于阈值则新容量以三倍阈值作为增长量进行累加直到超过新长度
+
+## Clone
+
+```go
+func Clone[S ~[]E, E any](s S) S {
+	// Preserve nilness in case it matters.
+	if s == nil {
+		return nil
+	}
+	// Avoid s[:0:0] as it leads to unwanted liveness when cloning a
+	// zero-length slice of a large array; see https://go.dev/issue/68488.
+	return append(S{}, s...) // S 就相当于 []int、[]string ...
+}
+
+```
+
+## 迭代器
+
+```go
+type Seq[V any] func(yield func(V) bool)
+
+type Seq2[K, V any] func(yield func(K, V) bool)
+
+func AppendSeq[Slice ~[]E, E any](s Slice, seq iter.Seq[E]) Slice {
+	for v := range seq {
+		s = append(s, v)
+	}
+	return s
+}
+
+// Collect collects values from seq into a new slice and returns it.
+// If seq is empty, the result is nil.
+func Collect[E any](seq iter.Seq[E]) []E {
+	return AppendSeq([]E(nil), seq)
+}
+```
+
+1. 迭代器本身就是一个函数
+2. range 支持遍历函数（迭代器）
+
+## Concat
+
+```go
+func Concat[S ~[]E, E any](slices ...S) S {
+	size := 0
+	for _, s := range slices {
+		size += len(s)
+		if size < 0 {
+			panic("len out of range")
+		}
+	}
+	// Use Grow, not make, to round up to the size class:
+	// the extra space is otherwise unused and helps
+	// callers that append a few elements to the result.
+	newslice := Grow[S](nil, size)
+	for _, s := range slices {
+		newslice = append(newslice, s...)
+	}
+	return newslice
+}
+```
+
+## Grow
+
+```go
+func Grow[S ~[]E, E any](s S, n int) S {
+	if n < 0 {
+		panic("cannot be negative")
+	}
+	if n -= cap(s) - len(s); n > 0 {
+		// This expression allocates only once (see test).
+		s = append(s[:cap(s)], make([]E, n)...)[:len(s)]
+	}
+	return s
+}
+```
+
+增加切片的容量：
+1. 如果n的长度小于剩余可用量则不进行扩展
+2. 否则额外扩展n个容量
+
+## Reverse
+
+```go
+func Reverse[S ~[]E, E any](s S) {
+	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+		s[i], s[j] = s[j], s[i]
+	}
+}
+```
+
+1. 利用 x, y = y, x方式，进行头尾交换实现reverse****
