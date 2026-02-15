@@ -30,8 +30,7 @@ func main() {
    * 如果每次创建一个不占空间的对象，都需要在堆上分配一个内存空间，比较浪费内存和cpu
 2. 什么情况下会返回zerobase?
 
-   * 只有被分配在堆上，并且占据大小为0
-   * 当空对象在结构体中不是最后一个的情况（地址等于下一个字段的地址）
+   * 只有被分配在堆上，并且占据大小为0，空对象在结构体中不是最后一个的情况（地址等于下一个字段的地址）
 3. 什么情况下不会返回zerobase?
 
    * 当对象在结构体中末尾（会单独分配一个字节内存，这是因为末尾需要撑开一个字节，避免访问末尾空对象指针，导致返回到下一内存地址真正的对象）
@@ -95,6 +94,31 @@ type cancelCtx struct {
 	cause    error                 // set to non-nil by the first cancel call
 }
 
+func (c *cancelCtx) Done() <-chan struct{} {
+    d := c.done.Load() // 快速路径，强制从内存或/L1 cache读
+    if d != nil {
+        return d.(chan struct{})
+    }
+    c.mu.Lock() // 没有就需要自己创建（懒加载）
+    defer c.mu.Unlock()
+    d = c.done.Load() // 防止在拿到锁的期间有别的 goroutine 已经初始化了（双重检查）
+    if d == nil {
+        d = make(chan struct{})
+        c.done.Store(d)
+    }
+    return d.(chan struct{})
+}
+```
+
+1. `done` 这里是一个非常经典的性能优化。标准库没有直接使用 chan struct{}，而是用了原子值。为了避免互斥锁的高昂开销以及实现无锁的快速读取
+2. `children` 这是一个 Set 结构（用 map 模拟）。当父节点取消时，它需要遍历这个 map，递归地调用所有子节点的 `cancel` 方法。这就是“父死子必死”的实现基础
+
+```go
+func WithCancel(parent Context) (ctx Context, cancel CancelFunc) {
+    c := withCancel(parent)
+    return c, func() { c.cancel(true, Canceled, nil) }
+}
+
 func withCancel(parent Context) *cancelCtx {
 	if parent == nil {
 		panic("cannot create context from nil parent")
@@ -104,12 +128,6 @@ func withCancel(parent Context) *cancelCtx {
 	return c
 }
 
-func WithCancel(parent Context) (ctx Context, cancel CancelFunc) {
-	c := withCancel(parent)
-	return c, func() { c.cancel(true, Canceled, nil) }
-}
-
-// 会触发下面的逻辑
 func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 	c.Context = parent
 
@@ -120,14 +138,14 @@ func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 
 	select {
 	case <-done:
-		// parent is already canceled
+	    // 父节点已死，子节点直接自杀，不需要挂载
 		child.cancel(false, parent.Err(), Cause(parent))
 		return
 	default:
+		// 父节点没死，继续下一步
 	}
 
 	if p, ok := parentCancelCtx(parent); ok {
-		// parent is a *cancelCtx, or derives from one.
 		p.mu.Lock()
 		if err := p.err.Load(); err != nil {
 			// parent has already been canceled
@@ -136,6 +154,7 @@ func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 			if p.children == nil {
 				p.children = make(map[canceler]struct{})
 			}
+			// 将 child 加入父节点的 children map 中
 			p.children[child] = struct{}{}
 		}
 		p.mu.Unlock()
@@ -150,13 +169,12 @@ func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 		})
 		c.Context = stopCtx{
 			Context: parent,
-			stop:    stop,
+			stop:    stop, // 保存stop，在removeChild中可执行取消回调注册
 		}
 		c.mu.Unlock()
 		return
 	}
-
-	goroutines.Add(1)
+	
 	go func() {
 		select {
 		case <-parent.Done():
@@ -167,26 +185,8 @@ func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 }
 ```
 
-done 只有第一次调用Done方法的时候才会进行channel创建，如果只是创建cancelCtx而没有监听，则可以避免性能开销
-
-```go
-func (c *cancelCtx) Done() <-chan struct{} {
-	d := c.done.Load()
-	if d != nil {
-		return d.(chan struct{})
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	d = c.done.Load()
-	if d == nil {
-		d = make(chan struct{}) // 第一次也仅仅第一次进行创建
-		c.done.Store(d)
-	}
-	return d.(chan struct{})
-}
-```
-
-children 是实现“链式取消"的关键，当最顶上的context被取消后，其children存储的context也需要被取消，当然，如果子context调用了cancel，就需要把自己从children中移除（避免膨胀，允许gc回收）
+1. 最后开启goroutine进行阻塞等待parent节点完成（执行子节点取消），或者等子节点取消
+2. 额外加入了`AfterFunc`方法，目的是为了消除最后的goroutine
 
 ```go
 func (c *cancelCtx) cancel(removeFromParent bool, err, cause error) {
@@ -220,49 +220,65 @@ func (c *cancelCtx) cancel(removeFromParent bool, err, cause error) {
 		removeChild(c.Context, c) // 将自己从父节点移除
 	}
 }
+
+func removeChild(parent Context, child canceler) {
+    if s, ok := parent.(stopCtx); ok {
+        s.stop() // 如果是stopCtx则取消回调
+        return
+    }
+    p, ok := parentCancelCtx(parent)
+    if !ok {
+        return
+    }
+	p.mu.Lock()
+    if p.children != nil {
+        delete(p.children, child)
+    }
+    p.mu.Unlock()
+}
 ```
 
-例子
+1. 取消子节点需要，`cancel`第一个值需要传递false，避免子节点又把自己从parent节点移除（移除需要加parent的锁），从而避免死锁
+
+## afterFuncCtx
 
 ```go
-package main
+type afterFuncer interface {
+    AfterFunc(func()) func() bool
+}
 
-import (
-	"context"
-	"fmt"
-	"time"
-)
+type afterFuncCtx struct {
+    cancelCtx
+    once sync.Once // either starts running f or stops f from running
+    f    func()
+}
 
-func worker(ctx context.Context, name string) {
-	for {
-		select {
-		case <-ctx.Done():
-			fmt.Printf("【%s】收到停止信号，正在清理资源并退出...\n", name)
-			fmt.Printf("退出原因：%v\n", ctx.Err()) // 此时 ctx.Err() 会返回 "context canceled"
-			return
-		default:
-			// 5. 模拟正常的业务逻辑
-			fmt.Printf("【%s】正在扫描中...\n", name)
-			time.Sleep(1 * time.Second)
+func AfterFunc(ctx Context, f func()) (stop func() bool) {
+	a := &afterFuncCtx{
+		f: f,
+	}
+	a.cancelCtx.propagateCancel(ctx, a)
+	return func() bool {
+		stopped := false
+		a.once.Do(func() {
+			stopped = true
+		})
+		if stopped {
+			a.cancel(true, Canceled, nil)
 		}
+		return stopped
 	}
 }
 
-func main() {
-	parentCancelCtx, cancel := context.WithCancel(context.Background())
-	childCancelCtx, _ := context.WithCancel(parentCancelCtx)
-
-	go worker(parentCancelCtx, "父级任务")
-	go worker(childCancelCtx, "子级任务")
-
-	time.Sleep(2 * time.Second)
-
-	fmt.Println(">>> 停止父级任务")
-	cancel()
-
-	time.Sleep(1 * time.Second)
+func (a *afterFuncCtx) cancel(removeFromParent bool, err, cause error) {
+	a.cancelCtx.cancel(false, err, cause)
+	if removeFromParent {
+		removeChild(a.Context, a)
+	}
+	a.once.Do(func() {
+		go a.f() // 执行回调
+	})
 }
-
 ```
 
 ## TimerCtx
