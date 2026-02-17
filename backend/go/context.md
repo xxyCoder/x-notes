@@ -321,27 +321,25 @@ func WithDeadlineCause(parent Context, d time.Time, cause error) (Context, Cance
 	}
 	return c, func() { c.cancel(true, Canceled, nil) }
 }
+
+func (c *timerCtx) cancel(removeFromParent bool, err, cause error) {
+    c.cancelCtx.cancel(false, err, cause)
+    if removeFromParent {
+    // Remove this timerCtx from its parent cancelCtx's children.
+        removeChild(c.cancelCtx.Context, c)
+    }
+    c.mu.Lock()
+    if c.timer != nil {
+        c.timer.Stop()
+        c.timer = nil
+    }
+    c.mu.Unlock()
+}
 ```
 
 1. 检查父节点，如果父节点的deadline比子deadline还要早，那么没有意义了，直接把子context退化为cancelCtx
 2. timer是一个定时器，过了指定时间后就开始执行cancel
-3. 对于cancel进行重写
-
-```go
-func (c *timerCtx) cancel(removeFromParent bool, err, cause error) {
-	c.cancelCtx.cancel(false, err, cause)
-	if removeFromParent {
-		// Remove this timerCtx from its parent cancelCtx's children.
-		removeChild(c.cancelCtx.Context, c)
-	}
-	c.mu.Lock()
-	if c.timer != nil {
-		c.timer.Stop() // 关闭定时器，释放资源
-		c.timer = nil
-	}
-	c.mu.Unlock()
-}
-```
+3. 对于cancel进行重写（需要终止定时器），所以即使用完了相关资源也需要调用`cancel`方法避免内存泄漏
 
 ## valueCtx
 
