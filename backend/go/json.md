@@ -125,3 +125,199 @@ func escapeByMap() {
 	f(&d1)
 }
 ```
+
+## Marshal
+
+```go
+func Marshal(v any) ([]byte, error) {
+    e := newEncodeState()
+    defer encodeStatePool.Put(e)
+    
+    err := e.marshal(v, encOpts{escapeHTML: true})
+    if err != nil {
+    return nil, err
+    }
+    buf := append([]byte(nil), e.Bytes()...)
+    
+    return buf, nil
+}
+
+func (e *encodeState) marshal(v any, opts encOpts) (err error) {
+    defer func() {
+        if r := recover(); r != nil {
+            if je, ok := r.(jsonError); ok {
+                err = je.error
+            } else {
+                panic(r)
+            }
+        }
+    }()
+	// reflect.ValueOf(v) 会把空接口 v 拆开，提取出它底层的真实数据和类型指针
+	val := reflect.ValueOf(v)
+    typeEncoder(val.Type())(e, val, opts)
+    return nil
+}
+
+func typeEncoder(t reflect.Type) encoderFunc {
+    if fi, ok := encoderCache.Load(t); ok {
+        return fi.(encoderFunc)
+    }
+	
+    indirect := sync.OnceValue(func() encoderFunc {
+        return newTypeEncoder(t, true)
+    })
+    fi, loaded := encoderCache.LoadOrStore(t, encoderFunc(func(e *encodeState, v reflect.Value, opts encOpts) {
+        indirect()(e, v, opts)
+	}))
+    if loaded {
+        return fi.(encoderFunc)
+    }
+    
+    f := indirect()
+    encoderCache.Store(t, f)
+    return f
+}
+
+func newTypeEncoder(t reflect.Type, allowAddr bool) encoderFunc {
+    // If we have a non-pointer value whose type implements
+    // Marshaler with a value receiver, then we're better off taking
+    // the address of the value - otherwise we end up with an
+    // allocation as we cast the value to an interface.
+    if t.Kind() != reflect.Pointer && allowAddr && reflect.PointerTo(t).Implements(marshalerType) {
+        return newCondAddrEncoder(addrMarshalerEncoder, newTypeEncoder(t, false))
+    }
+    if t.Implements(marshalerType) {
+        return marshalerEncoder
+    }
+    if t.Kind() != reflect.Pointer && allowAddr && reflect.PointerTo(t).Implements(textMarshalerType) {
+        return newCondAddrEncoder(addrTextMarshalerEncoder, newTypeEncoder(t, false))
+    }
+    if t.Implements(textMarshalerType) {
+        return textMarshalerEncoder
+    }
+    
+    switch t.Kind() {
+        case reflect.Bool:
+            return boolEncoder
+        case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+            return intEncoder
+        case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+            return uintEncoder
+        case reflect.Float32:
+            return float32Encoder
+        case reflect.Float64:
+            return float64Encoder
+        case reflect.String:
+            return stringEncoder
+        case reflect.Interface:
+            return interfaceEncoder
+        case reflect.Struct:
+            return newStructEncoder(t)
+        case reflect.Map:
+            return newMapEncoder(t)
+        case reflect.Slice:
+            return newSliceEncoder(t)
+        case reflect.Array:
+            return newArrayEncoder(t)
+        case reflect.Pointer:
+            return newPtrEncoder(t)
+        default:
+            return unsupportedTypeEncoder
+    }
+}
+
+func newStructEncoder(t reflect.Type) encoderFunc {
+    se := structEncoder{fields: cachedTypeFields(t)}
+    return se.encode
+}
+```
+
+1. 昂贵反射算出来的全套字段信息，全都存进 se 这个实例里，然后将`se.encode`存储在`map`中从而实现“记忆类型”，后续相同的类型调用`Marshal`方法都可以避免重复序列化
+
+## Unmarshal
+
+```go
+func Unmarshal(data []byte, v any) error {
+    // 1. 声明工作台
+    var d decodeState
+    
+    // 2. 纯词法扫描（防爆炸）：不分配任何内存，只跑状态机，确保大括号闭合。
+    err := checkValid(data, &d.scan)
+    if err != nil {
+       return err
+    }
+
+    // 3. 把字节流 data 喂进工作台
+    d.init(data)
+    
+    // 4. 下发给内部解包函数
+    return d.unmarshal(v)
+}
+
+func (d *decodeState) unmarshal(v any) error {
+    // 1. 获取反射对象（此时 rv 代表整个 &u 指针）
+    rv := reflect.ValueOf(v)
+    
+    // 2. 死亡审判：如果不是指针，或者是个空指针，直接报错。
+    // 因为传值会导致修改的全是临时拷贝，外面的 u 根本不会变。
+    if rv.Kind() != reflect.Pointer || rv.IsNil() {
+    return &InvalidUnmarshalError{reflect.TypeOf(v)}
+    }
+    
+    d.scan.reset()
+    d.scanWhile(scanSkipSpace) // 跳过 JSON 开头的空格
+    
+    // 3. 第一次分发！拿着合法的整体指针 rv，送入中央路由器
+    err := d.value(rv)
+    // ...
+    return d.savedError
+}
+
+func (d *decodeState) value(v reflect.Value) error {
+    switch d.opcode {
+    // ...
+    // 扫描器看到了 `{"age": 10}` 的第一个字符 `{`，状态机给出的 opcode 就是 scanBeginObject
+    case scanBeginObject:
+        if v.IsValid() {
+        // 路由器搞不定对象，直接把整个指针 v 传给对象处理器！
+        if err := d.object(v); err != nil {
+            return err
+        }
+        } else {
+            d.skip()
+        }
+        d.scanNext()
+    // ...
+    }
+    return nil
+}
+
+func (d *decodeState) object(v reflect.Value) error {
+    // 1. 剥开指针，拿到 User 真实的反射实体 pv 和 类型 t
+    u, ut, pv := indirect(v, false)
+    // ...
+    v = pv
+    t := v.Type()
+    
+    var fields structFields
+    
+    // 2. 在看 JSON 键值对之前，先去解析 User 结构体！
+    switch v.Kind() {
+    // ...
+    case reflect.Struct:
+    // 极其关键！cachedTypeFields 会算出 Age 字段的内存偏移量，
+    // 并生成一个带有快速查找字典的 fields 对象。
+    fields = cachedTypeFields(t)
+    // ...
+}
+
+func cachedTypeFields(t reflect.Type) structFields {
+    if f, ok := fieldCache.Load(t); ok {
+        return f.(structFields)
+    }
+    f, _ := fieldCache.LoadOrStore(t, typeFields(t))
+    return f.(structFields)
+}
+```
+
+1. 先通过状态机完成零分配词法扫描，随后利用反射开启递归下降解析；在处理结构体时，预先提取并缓存各字段的物理内存偏移量，进而在循环读取 JSON 键值对时，精准算出目标字段的绝对内存地址，最后调用底层反射接口将字面量直接覆写进该区块
