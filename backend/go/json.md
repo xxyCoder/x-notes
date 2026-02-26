@@ -321,3 +321,59 @@ func cachedTypeFields(t reflect.Type) structFields {
 ```
 
 1. 先通过状态机完成零分配词法扫描，随后利用反射开启递归下降解析；在处理结构体时，预先提取并缓存各字段的物理内存偏移量，进而在循环读取 JSON 键值对时，精准算出目标字段的绝对内存地址，最后调用底层反射接口将字面量直接覆写进该区块
+
+## Encoder
+
+```go
+type Encoder struct {
+	w          io.Writer
+	err        error
+	escapeHTML bool
+
+	indentBuf    []byte
+	indentPrefix string
+	indentValue  string
+}
+
+// NewEncoder returns a new encoder that writes to w.
+func NewEncoder(w io.Writer) *Encoder {
+	return &Encoder{w: w, escapeHTML: true}
+}
+
+func (enc *Encoder) Encode(v any) error {
+    if enc.err != nil {
+        return enc.err
+    }
+
+    e := newEncodeState()
+    defer encodeStatePool.Put(e)
+
+    err := e.marshal(v, encOpts{escapeHTML: enc.escapeHTML})
+    if err != nil {
+        return err
+    }
+
+    // Terminate each value with a newline.
+    // This makes the output look a little nicer
+    // when debugging, and some kind of space
+    // is required if the encoded value was a number,
+    // so that the reader knows there aren't more
+    // digits coming.
+    e.WriteByte('\n')
+
+    b := e.Bytes()
+    if enc.indentPrefix != "" || enc.indentValue != "" {
+        enc.indentBuf, err = appendIndent(enc.indentBuf[:0], b, enc.indentPrefix, enc.indentValue)
+        if err != nil {
+            return err
+        }
+        b = enc.indentBuf
+    }
+    if _, err = enc.w.Write(b); err != nil {
+        enc.err = err
+	}
+    return err
+}
+```
+
+1. 流程和`Marshal`类似，数据流向`w`
