@@ -258,3 +258,143 @@ Go 的解决办法极其暴力且优雅：
 
 为什么 sliceType 没有？
 因为 sliceType 自身代表的已经是切片类型了（比如 []int64）。如果你要对一个切片再次进行切片操作（s[1:2]），产生的新切片类型依然是 []int64，类型根本没有发生改变，反射包直接复用当前的 *rtype 即可，完全不需要额外缓存其他类型的指针。
+
+## Value
+
+```go
+type Value struct {
+    typ_ *abi.Type
+    ptr unsafe.Pointer
+    flag
+}
+type flag uintptr
+```
+
+1. `ptr` 它指向了实际存储数据的内存地址
+2. `flag` 被当作位掩码
+
+```json
+{
+  // 基础类型：Bool (Kind = 1)
+  // 场景: v := reflect.ValueOf(true)
+  "Bool": {
+    "typ_": "0x0050A010", // 指向 bool 类型的 abi.Type 元数据
+    "ptr": "0x00C0000010", // 指向逃逸到堆上的 1 字节内存块
+    "flag": 129            // 128 (flagIndir 间接寻址) | 1 (Kind)
+  },
+
+  // 基础类型：Int64 (Kind = 6)
+  // 场景: v := reflect.ValueOf(int64(42))
+  "Int64": {
+    "typ_": "0x0050A020", // 指向 int64 类型的 abi.Type
+    "ptr": "0x00C0000020", // 指向堆上存有数值 42 的 8 字节连续内存
+    "flag": 134            // 128 (flagIndir 间接寻址) | 6 (Kind)
+  },
+
+  // 基础类型：Float64 (Kind = 14)
+  // 场景: v := reflect.ValueOf(float64(3.14))
+  "Float64": {
+    "typ_": "0x0050A030", // 指向 float64 类型的 abi.Type
+    "ptr": "0x00C0000030", // 指向堆上存有 IEEE 754 浮点数的内存
+    "flag": 142            // 128 (flagIndir 间接寻址) | 14 (Kind)
+  },
+
+  // 复合类型：String (Kind = 24)
+  // 场景: v := reflect.ValueOf("Go")
+  "String": {
+    "typ_": "0x0050A040", // 指向 string 类型的 abi.Type
+    "ptr": "0x00C0000040", // 指向分配在堆上的 StringHeader (含 Data 和 Len)
+    "flag": 152            // 128 (flagIndir 间接寻址) | 24 (Kind)
+  },
+
+  // 复合类型：Slice (Kind = 23)
+  // 场景: v := reflect.ValueOf([]int64{1, 2})
+  "Slice": {
+    "typ_": "0x0050A050", // 指向 sliceType 结构体（包含内部元素 Elem 的类型信息）
+    "ptr": "0x00C0000050", // 指向分配在堆上的 SliceHeader (含 Data, Len, Cap)
+    "flag": 151            // 128 (flagIndir 间接寻址) | 23 (Kind)
+  },
+
+  // 复合类型：Array (Kind = 17)
+  // 场景: v := reflect.ValueOf([2]int64{1, 2})
+  "Array": {
+    "typ_": "0x0050A060", // 指向 arrayType 结构体（包含 Len 数组长度信息）
+    "ptr": "0x00C0000060", // 指向堆上的连续内存（没有任何 Header，直接是数据本身铺开）
+    "flag": 145            // 128 (flagIndir 间接寻址) | 17 (Kind)
+  },
+
+  // 复合类型：Struct (Kind = 25)
+  // 场景: v := reflect.ValueOf(struct{A int64}{1})
+  "Struct": {
+    "typ_": "0x0050A070", // 指向 structType（内部 Fields 数组记录了每个字段的 Offset）
+    "ptr": "0x00C0000070", // 指向整个结构体实例在内存中的起始绝对地址
+    "flag": 153            // 128 (flagIndir 间接寻址) | 25 (Kind)
+  },
+
+  // 接口类型：Interface (Kind = 20)
+  // 场景: var err error = io.EOF; v := reflect.ValueOf(&err).Elem()
+  "Interface": {
+    "typ_": "0x0050A080", // 指向 interfaceType 结构体
+    "ptr": "0x00C0000080", // 指向堆上的 iface 结构体（包含 tab 虚表指针 和 data 数据指针）
+    "flag": 148            // 128 (flagIndir 间接寻址) | 20 (Kind)
+  },
+
+  // =========================================================================
+  // 下方 4 种类型为【直接引用】(DirectIface)
+  // 底层规约：因为它们本身就是指针，刚好能塞进空接口 eface 的 8 字节 Data 字段里。
+  // 所以反射结构体中的 ptr 直接存放原始指针，无需二次寻址，flag 绝对不包含 flagIndir(128)。
+  // =========================================================================
+
+  // 引用类型：Pointer (Kind = 22)
+  // 场景: var x int64; v := reflect.ValueOf(&x)
+  "Pointer": {
+    "typ_": "0x0050A090", // 指向 ptrType（包含它所指向的 Elem 元素类型信息）
+    "ptr": "0x00C0000090", // 直接存储外部变量 x 的物理内存地址！
+    "flag": 22             // 0 (无 flagIndir) | 22 (Kind)
+  },
+
+  // 引用类型：Map (Kind = 21)
+  // 场景: v := reflect.ValueOf(make(map[int]int))
+  "Map": {
+    "typ_": "0x0050A0A0", // 指向 mapType
+    "ptr": "0x00C00000A0", // 直接存储底层的 *runtime.hmap 指针
+    "flag": 21             // 0 (无 flagIndir) | 21 (Kind)
+  },
+
+  // 引用类型：Chan (Kind = 18)
+  // 场景: v := reflect.ValueOf(make(chan int))
+  "Chan": {
+    "typ_": "0x0050A0B0", // 指向 chanType（包含通道的方向 Dir 信息）
+    "ptr": "0x00C00000B0", // 直接存储底层的 *runtime.hchan 指针
+    "flag": 18             // 0 (无 flagIndir) | 18 (Kind)
+  },
+
+  // 引用类型：Func (Kind = 19)
+  // 场景: v := reflect.ValueOf(fmt.Println)
+  "Func": {
+    "typ_": "0x0050A0C0", // 指向 funcType（包含出入参的类型列表）
+    "ptr": "0x00C00000C0", // 直接存储底层的函数指针
+    "flag": 19             // 0 (无 flagIndir) | 19 (Kind)
+  },
+
+  // =========================================================================
+  // 下方 2 种为【特殊权限场景】，展示反射如何通过 flag 控制内存读写权限。
+  // =========================================================================
+
+  // 特殊场景 1：可寻址（Addressable），允许被覆写修改
+  // 场景: var x int64; v := reflect.ValueOf(&x).Elem()
+  "Addressable_Int64": {
+    "typ_": "0x0050A020", // 依然指向 int64 的 abi.Type
+    "ptr": "0x00C0000090", // Elem() 穿透了外层指针，直接锚定外部变量 x 的物理地址
+    "flag": 390            // 256 (flagAddr 可寻址) | 128 (flagIndir) | 6 (Kind=Int64)
+  },
+
+  // 特殊场景 2：严格只读（Read-Only），由私有字段触发
+  // 场景: type T struct { a int64 }; v := reflect.ValueOf(T{1}).Field(0)
+  "ReadOnly_Private_Field": {
+    "typ_": "0x0050A020", // 指向该字段 a 的真实类型 int64
+    "ptr": "0x00C0000070", // 结构体首地址 + 字段偏移量（Offset）算出来的物理地址
+    "flag": 166            // 32 (flagStickyRO 非导出字段，锁死写入权限) | 128 (flagIndir) | 6 (Kind=Int64)
+  }
+}
+```
