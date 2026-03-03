@@ -70,7 +70,7 @@ func (f *FlagSet) Parse(arguments []string) error {
 1. 边界条件与终止符拦截
 
 ```go
-if len(f.args) == 0 {
+    if len(f.args) == 0 {
        return false, nil // 池子空了，解析自然结束
     }
     s := f.args[0]       // 永远只盯着当前池子的第一个元素
@@ -91,7 +91,7 @@ if len(f.args) == 0 {
 2. 语法校验与键值拆包
 
 ```go
-name := s[numMinuses:] // 剥离前缀，拿到纯名字（比如 "port" 或 "port=8080"）
+    name := s[numMinuses:] // 剥离前缀，拿到纯名字（比如 "port" 或 "port=8080"）
     if len(name) == 0 || name[0] == '-' || name[0] == '=' {
        return false, f.failf("bad flag syntax: %s", s) // 拦截 "---" 或 "-=" 这种畸形输入
     }
@@ -113,7 +113,7 @@ name := s[numMinuses:] // 剥离前缀，拿到纯名字（比如 "port" 或 "po
 3. 字典查表与内置 Help 拦截
 
 ```go
-flag, ok := f.formal[name] // 去上一回合讲到的 formal 注册表里查
+    flag, ok := f.formal[name] // 去上一回合讲到的 formal 注册表里查
     if !ok {
        if name == "help" || name == "h" { // 标准库自带的温情：拦截 -h 或 --help
           f.usage()
@@ -156,4 +156,104 @@ if f.actual == nil {
     }
     f.actual[name] = flag // 登记造册，证明这个标志在本次运行中实际被用户触发了
     return true, nil
+```
+
+## TypeVar
+
+将命令行传入的值，绑定（注入）到你提前准备好的现有变量指针上
+
+StringVar、IntVar、Int64Var、Float64Var、UintVar、Uint64Var底层都是调用`Value`
+
+```go
+func (f *FlagSet) Var(value Value, name string, usage string) {
+	// Flag must not begin "-" or contain "=".
+	if strings.HasPrefix(name, "-") {
+		panic(f.sprintf("flag %q begins with -", name))
+	} else if strings.Contains(name, "=") {
+		panic(f.sprintf("flag %q contains =", name))
+	}
+
+	// Remember the default value as a string; it won't change.
+	flag := &Flag{name, usage, value, value.String()}
+	_, alreadythere := f.formal[name]
+	if alreadythere {
+		var msg string
+		if f.name == "" {
+			msg = f.sprintf("flag redefined: %s", name)
+		} else {
+			msg = f.sprintf("%s flag redefined: %s", f.name, name)
+		}
+		panic(msg) // Happens only if flags are declared with identical names
+	}
+	if pos := f.undef[name]; pos != "" {
+		panic(fmt.Sprintf("flag %s set at %s before being defined", name, pos))
+	}
+	if f.formal == nil {
+		f.formal = make(map[string]*Flag)
+	}
+	f.formal[name] = flag // 注册参数
+}
+```
+
+## Type
+
+它底层就是帮你 new 了一个指针，然后复用了 TypeVar 的逻辑
+
+```go
+func (f *FlagSet) Int(name string, value int, usage string) *int {
+	p := new(int)
+	f.IntVar(p, name, value, usage)
+	return p
+}
+```
+
+## Var
+
+允许你让命令行接收任意格式的数据（如 JSON、逗号分隔符、IP 地址等）
+
+只需要实现了`Value`接口即可
+
+```go
+type Value interface {
+	String() string
+	Set(string) error
+}
+```
+
+### 示例
+
+```go
+import (
+    "flag"
+    "fmt"
+    "strings"
+)
+
+// 1. 定义我们自己的底层类型
+type stringSlice []string
+
+// 2. 实现 flag.Value 接口的 String 方法（用于打印默认值和帮助信息）
+func (s *stringSlice) String() string {
+    return fmt.Sprintf("%v", *s)
+}
+
+// 3. 实现 flag.Value 接口的 Set 方法（核心逻辑：决定如何将终端输入的字符串变成切片）
+// 当用户输入 -hosts a.com,b.com 时，s 参数接收到的就是 "a.com,b.com"
+func (s *stringSlice) Set(val string) error {
+    // 语法操作：按逗号切分字符串，并追加到当前的切片指针指向的底层数组中
+    *s = strings.Split(val, ",")
+    return nil
+}
+
+func main() {
+    // 准备一个空切片作为接收容器
+    var hosts stringSlice
+    
+    // 4. 调用 Var 方法注册。因为 *stringSlice 实现了 Value 接口，所以可以作为第一个参数传入
+    flag.Var(&hosts, "hosts", "comma-separated list of hostnames")
+    flag.Parse()
+
+    // 此时，hosts 已经是一个优雅的 Go 切片了，可以直接遍历
+    fmt.Printf("Parsed hosts: %q\n", hosts) // 输出示例: Parsed hosts: ["a.com" "b.com"]
+}
 ```
