@@ -251,3 +251,42 @@ func (h *commonHandler) withAttrs(as []Attr) *commonHandler {
     return h2
 }
 ```
+
+## Handle
+
+将内容进行输出
+
+```go
+// handle 是 TextHandler 和 JSONHandler 内部真正调用的核心实现
+func (h *commonHandler) handle(r Record) error {
+    // 1. 【拿个空盘子】：从 sync.Pool 里捞一个复用的 Buffer 出来
+    state := h.newHandleState(buffer.New(), true, "")
+    defer state.free() // 函数结束时，把盘子洗干净还给 Pool
+
+    if h.json {
+       state.buf.WriteByte('{') // JSON 起手式
+    }
+
+    // --- 2. 【先放主菜】：内置字段 ---
+    // 按顺序把 time, level, source, msg 写进 Buffer
+    // (这部分为了不被自定义 Group 影响，甚至先把 state.groups 临时设为了 nil)
+    // ... (省略了 built-in 属性的拼装代码)
+
+    // --- 3. 【再放配菜和预制菜】：非内置字段 ---
+    // 调用 appendNonBuiltIns：
+    // a) 先把 WithAttrs 提前烤好的“预制菜” preformattedAttrs 直接倒进 Buffer。
+    // b) 再把当前这条日志附带的临时 Attrs (r.Attrs) 挨个写进 Buffer。
+    // c) 最后，根据打开的组数量，补齐对应数量的 '}' 右括号。
+    state.appendNonBuiltIns(r)
+    
+    // 给整条日志收个尾：加个换行符
+    state.buf.WriteByte('\n')
+
+    // --- 4. 【上菜！】：加锁，写入目的地 ---
+    h.mu.Lock()
+    defer h.mu.Unlock()
+    _, err := h.w.Write(*state.buf)
+    
+    return err
+}
+```
