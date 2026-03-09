@@ -20,9 +20,13 @@ type Conn interface {
 }
 ```
 
-1. `Read`从连接中读取数据，可通过 `SetReadDeadline `或 `SetDeadline`设置读取超时时间
-2. `Write`把数据写入到连接中，可通过 `SetWriteDeadline`或 `SetDeadline`设置写入超时时间
-3. `Close`把缓冲区的数据写入到连接中，解除被阻塞的 `Write`和 `Read`并返回错误
+1. `Read` 读的是从网络上到达本机、且已经存放在 **操作系统内核的套接字接收缓冲区（Socket Receive Buffer）** 里的数据
+2. `Write` 写到操作系统内核的套接字发送缓冲区（Socket Send Buffer）
+3. `Close` 把缓冲区的数据写入到连接中，解除被阻塞的 `Write`和 `Read`并返回错误
+   - 再调用 Read：会返回 n=0 + 错误（通常是 EOF 或 “连接已关闭” 类错误）。
+   - 再调用 Write：会返回 n=0 + 错误（“broken pipe” 或 “connection reset by peer”）
+   - 对于TCP连接，会异步执行四次挥手
+4. `SetXXXDeadline` 的边界是相对时间，过了这个时间相关操作就不可用，调用就会报错超时
 
 ### TCPConn
 
@@ -38,18 +42,17 @@ type conn struct {
 type netFD struct {
 	pfd poll.FD
 
-	// immutable until Close
-	family      int
-	sotype      int
-	isConnected bool // handshake completed or use of association with peer
-	net         string
-	laddr       Addr
-	raddr       Addr
+	// 以下字段在 Close 之前是不可变的
+	family      int  // 协议族 (AF_INET, AF_INET6, AF_UNIX)
+	sotype      int  // Socket 类型 (SOCK_STREAM, SOCK_DGRAM)
+	isConnected bool // 是否已连接 (TCP 三次握手是否完成)
+	net         string  // 网络类型字符串 ("tcp", "udp")
+	laddr       Addr  // 本地地址
+	raddr       Addr  // 远程地址
 }
 ```
 
-1. **`net.netFD`** : 网络文件描述符，是 Go 网络库与底层 `poll` 库的桥梁
-2. **`poll.FD`** : 真正负责与操作系统交互的结构，包含系统调用封装和 `netpoller` 的钩子
+1. `poll.FD` 是 Go 语言运行时 (Runtime) 内部的结构体，它直接对接操作系统的 IO 多路复用机制（Linux 的 epoll，macOS 的 kqueue，Windows 的 IOCP）
 
 #### READ
 
@@ -105,7 +108,13 @@ func (fd *FD) Read(p []byte) (int, error) {
 }
 ```
 
-底层还是调用了 `pfd`进行读取数据
+1. 并发安全（读锁）：`fd.readLock()` 保证了在进行读操作时，不会与其他并发关闭该文件描述符的操作发生冲突
+2. 准备轮询器：`fd.pd.prepareRead()` 会将当前的文件描述符注册到 Go 运行时的网络轮询器（Netpoller，底层对应 Linux 的 epoll 或 macOS 的 kqueue）中
+3. 非阻塞系统调用（syscall.Read）：Go 在创建网络连接时，默认会将 Socket 设置为非阻塞模式。因此，syscall.Read 会立即返回
+   - 如果内核接收缓冲区里有数据，syscall.Read 会直接读到数据并返回。
+   - 如果缓冲区为空，因为是非阻塞模式，系统调用不会阻塞 OS 线程，而是立刻返回一个 syscall.EAGAIN 错误（表示资源暂时不可用，请重试）
+4. runtime_pollWait 是连接系统 I/O 和 Go 调度器的桥梁。它会挂起当前的 Goroutine（将其状态置为 waiting），并释放当前占据的 OS 线程（M）。OS 线程会立刻去执行其他就绪的 Goroutine。
+5. 当网卡真正收到数据并写入内核缓冲区后，底层的 epoll 会触发事件，Go 的 Netpoller 会捕获到这个事件，并将之前挂起的 Goroutine 重新放入可运行队列中。Goroutine 被唤醒后，continue 回到 for 循环的开头，再次发起 syscall.Read，此时就能顺利读到数据了。
 
 #### Write
 
@@ -176,6 +185,14 @@ func (fd *FD) Write(p []byte) (int, error) {
 }
 ```
 
+1. `fd.writeLock()`：加写锁，防止在写入过程中其他 Goroutine 并发调用 Close 关闭该文件描述符
+2. `fd.pd.prepareWrite()`：将 FD 注册到 Netpoller，为后续可能的挂起和唤醒做准备
+3. 代码中对 maxRW 的判断是一个非常细节的系统兼容性处理。在某些操作系统（如 macOS/Darwin）上，如果一次性向内核非阻塞 Socket 写入过大的数据（例如超过 1GB），系统调用可能会直接报错或表现异常。因此，Go 会按 maxRW 为单位把大数据切成小块，分批次调用底层 syscall.Write
+4. ignoringEINTRIO(syscall.Write...) 发起真实的系统调用。同样，因为是非阻塞 Socket，这步不会卡死系统线程
+   - 如果 syscall.Write 返回了数据 n > 0，就累加已写入的字节数 nn += n。如果 nn == len(p)，说明全写完了，直接返回
+   - 如果底层的 TCP 发送缓冲区满了（比如网络拥塞，接收方处理太慢），syscall.Write 无法把数据塞进内核，就会返回 syscall.EAGAIN；此时，代码进入 err == syscall.EAGAIN 分支，调用 fd.pd.waitWrite()。这会把当前的 Goroutine 挂起休眠，交出 CPU 执行权 
+5. 当底层的 TCP 协议栈将数据发出去，内核发送缓冲区又腾出空间时，底层的 epoll 会触发可写事件。Go 的 Netpoller 捕获后，会唤醒刚刚被挂起的 Goroutine。
+
 #### 设置超时
 
 ```go
@@ -200,8 +217,11 @@ func setDeadlineImpl(fd *FD, t time.Time, mode int) error {
 }
 ```
 
-1. 超时不是由操作系统内核（如 `SO_RCVTIMEO`）处理的，而是由 Go Runtime 自己维护的一套定时器机制，因为非阻塞下，Read调用要么拿到数据，要么返回错误表示内核没数据，不会在内核逗留
-2. 因为系统调用（如 `setsockopt`）是针对线程的。而 Go 的目标是在一个线程上运行成千上万个协程。如果使用内核的 `SO_RCVTIMEO`，当超时发生时，整个线程会被阻塞或接收信号。通过在 `runtime` 层实现超时，Go 可以精准地只唤醒那一个过期的协程
+1. 你的 Read 或 Write 协程因为没有数据而被 epoll 挂起休眠。 
+2. 此时，到了你设置的 Deadline 时间，网络数据依然没来。 
+3. Go Runtime 内部的监控线程（sysmon）或调度器发现了这个到期的定时器。 
+4. Runtime 会主动把之前挂起休眠的那个 Goroutine 强制唤醒。 
+5. 唤醒后，Read/Write 函数底层的 pollWait 会返回一个超时错误，随后向用户层抛出我们常见的 os.ErrDeadlineExceeded（即 "i/o timeout"），从而避免了协程死锁。
 
 #### Keep Alive
 
@@ -236,7 +256,7 @@ type KeepAliveConfig struct {
 ```go
 func setReadBuffer(fd *netFD, bytes int) error {
 	// syscall.SOL_SOCKET 表示通用套接字选项
-    	// syscall.SO_RCVBUF 表示接收缓冲区
+	// syscall.SO_RCVBUF 表示接收缓冲区
 	err := fd.pfd.SetsockoptInt(syscall.SOL_SOCKET, syscall.SO_RCVBUF, bytes)
 	runtime.KeepAlive(fd)
 	return wrapSyscallError("setsockopt", err)
