@@ -411,6 +411,64 @@ func internetSocket(ctx context.Context, net string, laddr, raddr sockaddr, soty
 
 1. `socket` 会强制打上 SOCK_NONBLOCK 和 SOCK_CLOEXEC 标志。在 Go 的世界里，所有的网络 Socket 默认都是非阻塞的；返回的已经调过了 `bind` 和 `listen`方法的套接字。
 
+## socket
+
+```go
+func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only bool, laddr, raddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) (fd *netFD, err error) {
+    // [关键动作 A]：调用内核系统调用 socket()。
+    // syscall.Socket(family, sotype, proto) 拿到一个原始的整型文件描述符 (int fd)。
+    // 注意：Go 默认会将该 FD 设为 Non-blocking (非阻塞) 模式。
+    s, err := sysSocket(family, sotype, proto)
+    if err != nil {
+        return nil, err
+    }
+
+    // [关键动作 B]：设置 IPv6 专属选项。
+    // 如果是 IPv6，根据 ipv6only 参数决定是否允许该 Socket 同时监听/连接 IPv4。
+    if err = setIPv6Only(s, ipv6only); err != nil {
+        poll.CloseFunc(s)
+        return nil, err
+    }
+
+    // [关键动作 C]：包装为 netFD。
+    // netFD 是 Go 对原始 int fd 的高级封装，它内置了网络轮询器 (Runtime Poller)。
+    // 这一步之后，这个 FD 就具备了“能被 Go 协程调度”的能力。
+    if fd, err = newFD(s, family, sotype, net); err != nil {
+        poll.CloseFunc(s)
+        return nil, err
+    }
+
+    // [关键动作 D]：执行用户自定义钩子 (ControlContext)。
+    // 如果你在 Dialer 里设置了 Control，此时内核刚分配完 FD 但还没开始 connect()。
+    // 这就是你通过 syscall 修改 Socket 选项（如 SO_REUSEPORT）的最后机会。
+    if ctrlCtxFn != nil {
+        if err := ctrlCtxFn(ctx, net, raddr.String(), fd.pfd.RawConn()); err != nil {
+            fd.Close()
+            return nil, err
+        }
+    }
+
+    // [关键动作 E]：发起连接或监听。
+    if laddr != nil || raddr != nil {
+        switch mode {
+        case "dial":
+            // 重点！这里会调用 fd.connect()。
+            // 它是如何实现“非阻塞连接+Context超时”的？请看下方深度解析。
+            if err := fd.connect(ctx, laddr, raddr); err != nil {
+                fd.Close()
+                return nil, err
+            }
+        case "listen":
+            if err := fd.listenStream(laddr, listenerBacklog(), ctrlCtxFn); err != nil {
+                fd.Close()
+                return nil, err
+            }
+        }
+    }
+    return fd, nil
+}
+```
+
 ## Dialer
 
 ```go
@@ -429,73 +487,326 @@ type Dialer struct {
 	KeepAliveConfig KeepAliveConfig
 
 	Resolver *Resolver
+
+    ControlContext func(ctx context.Context, network, address string, c syscall.RawConn) error
 }
+```
 
+1. `Deadline` 设置一个绝对的时间点，过了这个时间点，所有的拨号尝试都会立刻失败
+2. `Timeout` 设置单次拨号的最长时间（三次握手作为边界点）
+3. `FallbackDelay` 指定在发起 IPv6 连接后，等待多久还没成功，就并行发起 IPv4 连接
+4. `Resolver` 允许你指定一个自定义的 DNS 解析器
+5. `ControlContext` 在实际发起 Dial 连接之前，对底层的 Socket 进行系统调用级别的修改
 
+### DialContext
+
+```go
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn, error) {
-    // 1. 解析地址：返回一个 IP 列表（可能包含 IPv4 和 IPv6）
-    addrs, err := d.resolver().resolveAddrList(ctx, "dial", network, address, d.LocalAddr)
-  
-    // 2. 如果解析出多个地址，进入并发竞速逻辑
-    if len(addrs) > 1 && d.fallbackDelay() >= 0 {
-        return d.dialParallel(ctx, network, addrs)
+    // 融合 Dialer 的超时配置与传入 ctx 的截止时间，取最早到达者作为最终边界
+    ctx, cancel := d.dialCtx(ctx)
+    defer cancel()
+
+    resolveCtx := ctx
+    if trace, _ := ctx.Value(nettrace.TraceKey{}).(*nettrace.Trace); trace != nil {
+       // 克隆 trace 对象并清空 Connect 钩子。
+       // 原因：防止底层的 DNS 查询（UDP）误触发用户设定的“目标 TCP 连接建立”的埋点监控。
+       shadow := *trace
+       shadow.ConnectStart = nil
+       shadow.ConnectDone = nil
+       resolveCtx = context.WithValue(resolveCtx, nettrace.TraceKey{}, &shadow)
     }
-  
-    // 3. 只有一个地址或禁用并行，则串行连接
-    return d.dialSerial(ctx, network, addrs[0])
+
+    // 携带专属的 resolveCtx 进行 DNS 解析，获取目标域名的所有可用 IP 列表
+    addrs, err := d.resolver().resolveAddrList(resolveCtx, "dial", network, address, d.LocalAddr)
+    if err != nil {
+       return nil, &OpError{Op: "dial", Net: network, Source: nil, Addr: nil, Err: err}
+    }
+
+    // 组装底层拨号器，将高层 Dialer 配置下沉
+    sd := &sysDialer{
+       Dialer:  *d,
+       network: network,
+       address: address,
+    }
+
+    var primaries, fallbacks addrList
+    if d.dualStack() && network == "tcp" {
+       // RFC 6555 Happy Eyeballs 准备阶段：
+       // 开启双栈且为 TCP 时，将 IP 列表按 IPv6 (首选) 和 IPv4 (备选) 分离
+       primaries, fallbacks = addrs.partition(isIPv4)
+    } else {
+       primaries = addrs
+    }
+
+    // 启动并发竞速：优先尝试 primaries，超时未果则立即并行尝试 fallbacks
+    return sd.dialParallel(ctx, primaries, fallbacks)
 }
+```
 
-func (d *Dialer) dialParallel(ctx context.Context, network string, addrs addrList) (Conn, error) {
-    returned := make(chan struct{}) // 用于通知其他协程停止尝试
-    results := make(chan dialResult) // 接收连接结果的通道
+仅做超时融合、解析地址以及开启并发竞速
 
-    // 尝试启动第一个连接（通常是 IPv6）
-    go func() {
-        // ... dialSerial ...
-        results <- dialResult{conn, err}
-    }()
+#### dialParallel
 
-    // 启动定时器：等待 fallbackDelay (默认 300ms)
-    // 如果第一个没连上，就启动第二个连接（通常是 IPv4）
-    timer := time.NewTimer(d.fallbackDelay())
-  
-    for i := 0; i < len(addrs); i++ {
-        select {
-        case res := <-results:
-            if res.err == nil {
-                close(returned) // 赢家诞生，关闭通道通知其他人
-                return res.conn, nil
-            }
-        case <-timer.C:
-            // 时间到，启动下一个地址的连接
-            go dialNextAddr()
-        }
-    }
-}
-
-
-func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlFn func(string, string, syscall.RawConn) error) error {
-    // 1. 创建系统 Socket，注意：默认就是非阻塞的 (SOCK_NONBLOCK)
-    if err := fd.ctrlNetwork(ctx, laddr, raddr, ctrlFn); err != nil {
-        return err
+```go
+func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks addrList) (Conn, error) {
+    if len(fallbacks) == 0 {
+       return sd.dialSerial(ctx, primaries)
     }
 
-    // 2. 执行真正的连接
-    if err := fd.pfd.Connect(laddr, raddr); err != nil {
-        // 如果返回 EINPROGRESS，说明正在握手中，需要 netpoller 介入
-        if err == syscall.EINPROGRESS {
-            if err := fd.pfd.WaitWrite(); err != nil {
-                return err
-            }
-            // 唤醒后再次检查 Socket 错误状态
-            if err := fd.pfd.CheckError(); err != nil {
-                return err
-            }
-        }
+    // returned 用于在函数退出时向后台还在运行的慢协程广播结束信号。
+    // defer close(returned) 确保只要拿到结果退出函数，那些没抢到第一的连接会被立即销毁，防止底层 FD 泄漏。
+    returned := make(chan struct{})
+    defer close(returned)
+
+    type dialResult struct {
+       Conn
+       error
+       primary bool
+       done    bool
+    }
+    // results 用于接收两个并发协程传回的拨号结果（成功或失败）
+    results := make(chan dialResult) // 无缓冲通道
+
+    // startRacer 是负责实际拨号的闭包函数，它会在独立的协程中运行
+    startRacer := func(ctx context.Context, primary bool) {
+       ras := primaries
+       if !primary {
+          ras = fallbacks
+       }
+       // 调用底层方法真正发起串行拨号尝试
+       c, err := sd.dialSerial(ctx, ras)
+       select {
+       // 将拨号结果发送给主控循环的计分板
+       case results <- dialResult{Conn: c, error: err, primary: primary, done: true}:
+       // 如果准备发送结果时，发现 returned 已经被 close 了，说明别人赢了，直接关掉当前建好的连接
+       case <-returned:
+          if c != nil {
+             c.Close()
+          }
+       }
+    }
+
+    var primary, fallback dialResult
+
+    // 启动主选地址（通常是 IPv6）的拨号协程，率先起跑
+    primaryCtx, primaryCancel := context.WithCancel(ctx)
+    defer primaryCancel()
+    go startRacer(primaryCtx, true)
+
+    // 启动一个倒计时定时器（默认 300ms），作为备选地址的延跑时间
+    fallbackTimer := time.NewTimer(sd.fallbackDelay())
+    defer fallbackTimer.Stop()
+
+    // 主控循环：监听定时器和并发协程的结果
+    for {
+       select {
+       case <-fallbackTimer.C:
+          // 300ms 倒计时结束，主选路线仍未出结果。
+          // 立即启动备选地址（通常是 IPv4）的拨号协程，此时双线真正开始并发竞速。
+          fallbackCtx, fallbackCancel := context.WithCancel(ctx)
+          defer fallbackCancel()
+          go startRacer(fallbackCtx, false)
+
+       case res := <-results:
+          // 只要有任意一条赛道成功建立了连接，立即返回。
+          // 此时函数退出，触发 defer close(returned) 终结落后者。
+          if res.error == nil {
+             return res.Conn, nil
+          }
+          if res.primary {
+             primary = res
+          } else {
+             fallback = res
+          }
+          // 如果主备两条线都明确报告了失败，则返回主选路线的错误信息
+          if primary.done && fallback.done {
+             return nil, primary.error
+          }
+          // 关键优化：如果主选协程非常快地返回了失败（比如服务器直接拒绝连接），
+          // 并且此时 300ms 倒计时还没走完。
+          if res.primary && fallbackTimer.Stop() {
+             // 强行将定时器清零。
+             // 这会让下一次 for 循环立即触发上面的 fallbackTimer.C 分支，让备选协程一秒都不耽误，立刻起跑补位。
+             fallbackTimer.Reset(0)
+          }
+       }
     }
 }
 ```
 
-1. 会通过 `Resolver.resolveAddrList`进行域名解析，如果既有ipv6又有ipv4，会先通过goroutine启动ipv6连接，超过 `FallbackDelay`（默认300ms）还没连上就再启动goroutine连接ipv4地址，当其中一个连接成功后中断另一个
-2. 开启非阻塞连接，当TCP没握手完成就挂起当前goroutine
-3. 当TCP完成，内核会触发该 FD 的“可写”事件，`netpoller` 收到通知，唤醒挂起的 Goroutine
+1. 给予主选任务一定的抢跑时间。它返回最先建立成功的连接，并关闭其他慢连接。
+2. 如果主失败，直接开启备方案开跑
+3. 如果两边都失败，则返回主选地址的错误。
+
+#### dialSerial
+
+```go
+func (sd *sysDialer) dialSerial(ctx context.Context, ras addrList) (Conn, error) {
+    var firstErr error // 记录遇到的第一个错误，因为通常 DNS 返回的首选 IP 报错最有参考价值。
+
+    for i, ra := range ras {
+       select {
+       // 每次尝试连接新 IP 之前，先检查一下全局的 Context 是否已经被取消或超时。
+       // 如果外部已经放弃了（比如上层的 Timeout 到了），就没必要继续试了，直接跳出。
+       case <-ctx.Done():
+          return nil, &OpError{Op: "dial", Net: sd.network, Source: sd.LocalAddr, Addr: ra, Err: mapErr(ctx.Err())}
+       default:
+       }
+
+       dialCtx := ctx
+       // 如果全局 Context 设置了截止时间 (Deadline)，则需要进行“时间切片”
+       if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
+          // partialDeadline 算法：根据剩余的总时间和待尝试的 IP 数量，平摊计算出当前这个 IP 允许的最大耗时。
+          partialDeadline, err := partialDeadline(time.Now(), deadline, len(ras)-i)
+          if err != nil {
+             // 报错通常意味着总时间已经彻底耗尽（连个最低限度的尝试时间都不够了）。
+             // 此时没有必要再尝试剩下的地址了，记录错误并中断循环。
+             if firstErr == nil {
+                firstErr = &OpError{Op: "dial", Net: sd.network, Source: sd.LocalAddr, Addr: ra, Err: err}
+             }
+             break
+          }
+          
+          // 如果计算出的当前 IP 分片截止时间早于全局截止时间，
+          // 就用这个更短的分片时间，创建一个全新的子 Context (dialCtx)。
+          if partialDeadline.Before(deadline) {
+             var cancel context.CancelFunc
+             dialCtx, cancel = context.WithDeadline(ctx, partialDeadline)
+             // 无论当前 IP 连没连上，结束时立刻释放这个短生命周期的定时器
+             defer cancel()
+          }
+       }
+
+       // 携带分配好的 dialCtx，真正向下层发起对当前单个 IP (ra) 的 Socket 连接尝试
+       c, err := sd.dialSingle(dialCtx, ra)
+       if err == nil {
+          // 只要有一个 IP 握手成功，立刻返回该连接，剩下的 IP 直接丢弃不试了
+          return c, nil
+       }
+       
+       // 如果失败了，且是第一次失败，把它存下来作为最终的保底错误提示
+       if firstErr == nil {
+          firstErr = err
+       }
+    }
+
+    // 如果所有 IP 都试完了还没成功，且连个正经错误都没捕捉到（比如传入的 IP 列表是空的）
+    if firstErr == nil {
+       firstErr = &OpError{Op: "dial", Net: sd.network, Source: nil, Addr: nil, Err: errMissingAddress}
+    }
+    return nil, firstErr
+}
+```
+
+它会返回第一个成功建立的连接，或者在所有尝试失败后，返回第一个遇到的错误。
+
+#### dialSingle
+
+```go
+func (sd *sysDialer) dialSingle(ctx context.Context, ra Addr) (c Conn, err error) {
+    // 从 Context 中提取网络追踪器 (nettrace)。
+    // 如果用户在最上层注入了 httptrace 或 nettrace 监控钩子，这里就是通知外部的最佳时机。
+    trace, _ := ctx.Value(nettrace.TraceKey{}).(*nettrace.Trace)
+    if trace != nil {
+       raStr := ra.String()
+       // 触发“即将开始建立连接”的回调
+       if trace.ConnectStart != nil {
+          trace.ConnectStart(sd.network, raStr)
+       }
+       // 注册 defer，确保无论连接成功还是超时报错，都会触发“连接结束”的回调，并带上状态
+       if trace.ConnectDone != nil {
+          defer func() { trace.ConnectDone(sd.network, raStr, err) }()
+       }
+    }
+    
+    // 提取用户在 Dialer 中配置的本地绑定地址 (通常是 nil，由系统随机分配端口)
+    la := sd.LocalAddr
+    
+    // 核心路由分发：根据传入的目标地址类型 (ra) 进行类型断言 (Type Switch)
+    switch ra := ra.(type) {
+    case *TCPAddr:
+       // 目标是 TCP 地址，将本地地址也安全断言为 TCPAddr
+       la, _ := la.(*TCPAddr)
+       // 检查系统配置或环境变量是否要求开启多路径 TCP (MPTCP) 
+       if sd.MultipathTCP() {
+          c, err = sd.dialMPTCP(ctx, la, ra)
+       } else {
+          // 常规 TCP 拨号，绝大多数网页请求、RPC 调用都会走到这里
+          c, err = sd.dialTCP(ctx, la, ra)
+       }
+    case *UDPAddr:
+       la, _ := la.(*UDPAddr)
+       // UDP 是无连接的。这里的 dial 主要是绑定本地端口，
+       // 并为底层的 socket 调用 connect() 以绑定远端地址，方便后续直接 Read/Write
+       c, err = sd.dialUDP(ctx, la, ra)
+    case *IPAddr:
+       la, _ := la.(*IPAddr)
+       // 原始 IP 拨号（Raw Socket），跳过传输层，常用于自己实现 ping (ICMP) 等底层协议
+       c, err = sd.dialIP(ctx, la, ra)
+    case *UnixAddr:
+       la, _ := la.(*UnixAddr)
+       // Unix 域套接字拨号，不走网卡，专用于本机进程间的高速通信 (IPC)
+       c, err = sd.dialUnix(ctx, la, ra)
+    default:
+       // 遇到无法识别的地址类型，直接拦截并返回格式化错误
+       return nil, &OpError{Op: "dial", Net: sd.network, Source: la, Addr: ra, Err: &AddrError{Err: "unexpected address type", Addr: sd.address}}
+    }
+    
+    // 如果底层的具体协议拨号函数返回了错误，将其统一包装为标准库规范的 *net.OpError
+    if err != nil {
+       return nil, &OpError{Op: "dial", Net: sd.network, Source: la, Addr: ra, Err: err} 
+    }
+    
+    return c, nil
+}
+```
+
+它是整个拨号流程中，真正根据协议类型（TCP/UDP/Unix）进行分发下沉的枢纽。
+
+#### dialTCP
+
+```go
+func (sd *sysDialer) dialTCP(ctx context.Context, laddr, raddr *TCPAddr) (*TCPConn, error) {
+    return sd.doDialTCP(ctx, laddr, raddr)
+}
+
+func (sd *sysDialer) doDialTCP(ctx context.Context, laddr, raddr *TCPAddr) (*TCPConn, error) {
+    // 调用底层的 socket 抽象层。
+    // syscall.SOCK_STREAM 是极其核心的参数，它明确告诉操作系统内核：
+    // “我要创建一个面向连接的、可靠的字节流 Socket（即 TCP）”。
+    // 
+    // 这一步在操作系统层面会引发质变，依次执行三大系统调用：
+    // 1. socket()：向内核申请一个文件描述符 (FD)
+    // 2. bind()：如果配置了 LocalAddr，将 FD 绑定到本地指定端口
+    // 3. connect()：向目标 raddr 发起 TCP 三次握手！(重点：这是配合 Context 的非阻塞调用)
+    fd, err := internetSocket(ctx, sd.network, laddr, raddr, syscall.SOCK_STREAM, 0, "dial", sd.Dialer.ControlContext)
+    if err != nil {
+       return nil, err
+    }
+    
+    // 三次握手成功完成！操作系统正式确立了连接。
+    // 将内核返回的裸文件描述符 (fd) 包装成 Go 层的 TCPConn 对象。
+    // 同时把 Dialer 中配置的 KeepAlive 参数也一并传递进去，启动系统的 TCP 保活机制。
+    return newTCPConn(fd, sd.Dialer.KeepAlive, sd.testHookSetKeepAlive), nil
+}
+```
+
+#### dialUDP
+
+```go
+func (sd *sysDialer) dialUDP(ctx context.Context, laddr, raddr *UDPAddr) (*UDPConn, error) {
+    // 调用底层的 socket 抽象层。
+    // syscall.SOCK_DGRAM 告诉内核：“我要创建一个无连接的、不可靠的数据报文 Socket（即 UDP）”。
+    //
+    // 极其反直觉的一点是：尽管是 UDP，这里依然会让操作系统执行 connect() 系统调用！
+    // 区别在于：UDP 的 connect() 绝对不会像 TCP 那样往网络上发包去握手。
+    // 它仅仅是在操作系统内核态，把目标 IP 和端口“死死绑定”在这个 Socket 文件描述符上。
+    fd, err := internetSocket(ctx, sd.network, laddr, raddr, syscall.SOCK_DGRAM, 0, "dial", sd.Dialer.ControlContext)
+    if err != nil {
+       return nil, err
+    }
+    
+    // 包装成 UDPConn 对象返回
+    return newUDPConn(fd), nil
+}
+```
