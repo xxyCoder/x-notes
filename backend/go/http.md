@@ -592,8 +592,10 @@ type Request struct {
     Proto            string        // "HTTP/1.1"
     Header           Header        // map[string][]string，存储所有 Header
     Body             io.ReadCloser // 请求体，是一个流，只能读取一次
-    ContentLength    int64         // 内容长度
+    ContentLength    int64         // body内容长度
     Host             string        // 目标主机名
+
+    GetBody func() (io.ReadCloser, error)
   
     // 表单数据（需调用 ParseForm 后才有数据）
     Form             url.Values    // 包含 URL 查询参数和 POST 表单数据
@@ -606,6 +608,15 @@ type Request struct {
     // 还有 RemoteAddr, TLS, RequestURI 等...
 }
 ```
+
+1. `Body` 永远不为 nil，即使是 GET 请求没有 Body，这个字段也不会是 nil，只是去读的时候会立刻返回 EOF
+   - chunk 读取过程：如果没有数据则挂起；有多条数据也不会跨越边界，每次读取一次chunk
+2. `GetBody` 一种按需重新获取底层数据源读取权限的机制。它依赖于一个能记住原始数据的闭包或结构体，通过新建一个指针归零的读取器，来替换掉那个已经被读到 EOF（文件尾）的旧读取器
+3. `ContentLength` 为 body 内容的长度，如果是 chunk 传输则为-1
+4. `Form` 包含URL 和 POST表单数据，URL 参数排在前面，Body 参数追加在后面
+   - 当 URL 中有 key=A，Body 中也有 key=B 时，r.Form["key"] 的结果是 []string{"A", "B"}
+5. `PostForm` 仅包含 POST 表单数据
+6. `MultipartForm` 专为 multipart/form-data 设计
 
 ### 常用方法
 
