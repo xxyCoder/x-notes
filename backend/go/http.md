@@ -114,14 +114,24 @@ type Server struct {
 1. 基本属性
    * `Addr`: 监听地址。如果不填，默认是 `:80`。
    * `Handler`: 路由分发器。如果为 `nil`，系统会使用全局默认的 `http.DefaultServeMux`
-   * **`maxHeaderBytes`** ：这是一个安全屏障。为了防止  **Slowloris 攻击** （发送超大 Header 占满服务器内存），Go 允许你限制 Header 的最大字节数（默认约 1MB）
+   * `maxHeaderBytes` ：这是一个安全屏障。为了防止  **Slowloris 攻击** （发送超大 Header 占满服务器内存），Go 允许你限制 Header 的最大字节数（默认约 1MB）
 2. 超时控制
    * `ReadHeaderTimeout`：仅读取请求头的时间
    * `ReadTimeout`：读取整个请求（含 Body）的时间
    * `WriteTimeout`：从读取完 Header 开始计时。如果响应数据很大或网络慢，可能导致写入中断
    * `IdleTimeout`：决定长连接在没请求时多久被回收，如果不设，则复用 `ReadTimeout`
 
-## ListenAndServe
+### Close
+
+暴力关闭服务器。立即关闭所有底层网络监听器和当前所有的客户端连接
+
+1. 对于正在等待响应或正在上传数据的客户端
+   - 如果你用的是 Go 的 http.Client 请求这个服务端，客户端代码会收到类似 `EOF`、`read: connection reset by peer` 或 `unexpected EOF` 的错误。 
+   - 如果是浏览器访问，用户界面通常会直接显示 "`ERR_CONNECTION_CLOSED`" 或 "`ERR_CONNECTION_RESET`"。
+2. 对于尝试建立新连接的客户端：收到 `dial tcp: connect: connection refused` 的错误
+3. 对于服务端自身正在运行的 Handler：写入操作会失败，底层会抛出 `write: broken pipe` 的错误
+
+### ListenAndServe
 
 ```go
 func ListenAndServe(addr string, handler Handler) error {
@@ -188,6 +198,110 @@ func (s *Server) Serve(l net.Listener) error {
 2. 进入一个无限的 `for` 循环，不断执行 `Accept()` 接收新连接
 3. 每接收到一个新连接，服务器都会 **`go c.serve(connCtx)`**
 4. 在每个连接的 Goroutine 里，循环读取 HTTP 请求，解析协议，并最终调用 `Handler.ServeHTTP`
+
+### server
+
+```go
+// serve 是每个独立 TCP 连接的主处理生命周期
+func (c *conn) serve(ctx context.Context) {
+    // ==========================================
+    // 1. 全局兜底：防 panic 与 资源清理
+    // ==========================================
+    defer func() {
+        // 如果你写的 Handler 发生了 panic，这里会兜底捕获，防止整个服务端崩溃
+        if err := recover(); err != nil && err != ErrAbortHandler {
+            c.server.logf("http: panic serving %v: %v", c.remoteAddr, err)
+        }
+        // 确保最终一定会关闭底层的 TCP 连接，并更新连接状态为 Closed
+        c.close()
+        c.setState(c.rwc, StateClosed, runHooks)
+    }()
+
+    // ==========================================
+    // 2. TLS 握手与协议升级 (HTTPS & HTTP/2)
+    // ==========================================
+    if tlsConn, ok := c.rwc.(*tls.Conn); ok {
+        // 如果是 HTTPS 请求，先进行 TLS 握手
+        if err := tlsConn.HandshakeContext(ctx); err != nil {
+            return // 握手失败直接结束
+        }
+        
+        // ALPN 协议协商 (比如协商结果为 "h2"，即 HTTP/2)
+        // 如果协商出了新协议，会把连接交给专门的处理函数 (比如 HTTP/2 的处理器)，然后直接 return 退出当前 HTTP/1.x 的逻辑
+        if proto := tlsConn.ConnectionState().NegotiatedProtocol; validNextProto(proto) {
+            if fn := c.server.TLSNextProto[proto]; fn != nil {
+                fn(c.server, tlsConn, h)
+                return 
+            }
+        }
+    }
+
+    // ==========================================
+    // 3. 准备缓冲 I/O
+    // ==========================================
+    // 包装底层的 net.Conn，提供带缓冲的读写能力，提升 I/O 性能
+    c.bufr = newBufioReader(c.r)
+    c.bufw = newBufioWriterSize(checkConnErrorWriter{c}, 4<<10)
+
+    // ==========================================
+    // 4. HTTP/1.x 核心请求循环 (Keep-Alive 循环)
+    // ==========================================
+    for {
+        // 4.1 解析 HTTP 请求头
+        // 从连接中读取报文，解析 Method、URL、Header，生成 http.Request 对象
+        w, err := c.readRequest(ctx) 
+        if err != nil {
+            // 如果读取失败（如报文不合法、客户端断开等），返回错误并退出循环
+            return 
+        }
+
+        // 4.2 将当前连接状态标记为活跃 (Active)
+        c.setState(c.rwc, StateActive, runHooks)
+
+        // 4.3 ★ 核心中的核心：执行你的业务逻辑 ★
+        // serverHandler{c.server} 其实是对底层的路由复用器 (Mux) 的封装。
+        // ServeHTTP 方法内部会根据 URL 匹配对应的 Handler，最终执行你写的业务代码。
+        serverHandler{c.server}.ServeHTTP(w, w.req)
+
+        // 4.4 收尾当前请求
+        // 业务逻辑执行完了，把缓冲区里还没发出去的响应数据全部 Flush 到网络层
+        w.finishRequest()
+
+        // 4.5 连接复用判定 (Keep-Alive)
+        // 检查客户端是否带了 Connection: close，或者服务端是否正在平滑重启等
+        if !w.shouldReuseConnection() || !c.server.doKeepAlives() {
+            return // 不能复用，退出循环，触发 defer 里的 close()
+        }
+
+        // 4.6 状态重置与空闲超时等待
+        // 走到这里说明连接要被复用。将状态改回 Idle。
+        c.setState(c.rwc, StateIdle, runHooks)
+        
+        // 设置 IdleTimeout（空闲等待超时时间）
+        c.rwc.SetReadDeadline(time.Now().Add(c.server.idleTimeout()))
+
+        // 阻塞等待：通过 Peek(4) 尝试读取下一个请求的头 4 个字节。
+        // 如果在 IdleTimeout 内没等来新数据，err 不为空，退出循环并关闭连接。
+        // 等到了新数据，重置超时，进入下一次 for 循环！
+        if _, err := c.bufr.Peek(4); err != nil {
+            return
+        }
+        c.rwc.SetReadDeadline(time.Time{}) // 收到新请求了，清除 IdleTimeout
+    }
+}
+
+func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+   handler := sh.srv.Handler
+   if handler == nil {
+	   handler = DefaultServeMux
+   }
+   if !sh.srv.DisableGeneralOptionsHandler && req.RequestURI == "*" && req.Method == "OPTIONS" {
+	   handler = globalOptionsHandler{}
+   }
+   
+   handler.ServeHTTP(rw, req)
+}
+```
 
 ## 路由服务
 
