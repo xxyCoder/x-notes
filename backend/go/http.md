@@ -727,10 +727,12 @@ type Request struct {
    - chunk 读取过程：如果没有数据则挂起；有多条数据也不会跨越边界，每次读取一次chunk
 2. `GetBody` 一种按需重新获取底层数据源读取权限的机制。它依赖于一个能记住原始数据的闭包或结构体，通过新建一个指针归零的读取器，来替换掉那个已经被读到 EOF（文件尾）的旧读取器
 3. `ContentLength` 为 body 内容的长度，如果是 chunk 传输则为-1
-4. `Form` 包含URL 和 POST表单数据，URL 参数排在前面，Body 参数追加在后面
-   - 当 URL 中有 key=A，Body 中也有 key=B 时，r.Form["key"] 的结果是 []string{"A", "B"}
+4. `Form` 包含URL 和 POST表单数据，Body 参数排在前面，URL 参数追加在后面
+   - 当 URL 中有 key=A，Body 中也有 key=B 时，r.Form["key"] 的结果是 []string{"B", "A"}
 5. `PostForm` 仅包含 POST 表单数据
-6. `MultipartForm` 专为 multipart/form-data 设计
+6. `MultipartForm` 专为 `multipart/form-data` 设计
+
+Request 设计思路为数据的载体，由 Client 发送出去
 
 ### 常用方法
 
@@ -835,6 +837,143 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 2. 如 `strings.NewReader` 或 `bytes.NewBuffer`，它们只实现了 `io.Reader`（只有 `Read`），没有 `Close` 方法，所以用 `io.NopCloser` 注入一个**空的 `Close` 方法**
 3. `NewRequestWithContext`方法组装 `Request`结构体内容，设置 `GetBody`方法，`GetBody` 的存在是为了解决“重定向”或“重试”时的 Body 复用问题
 4. `WithContext`则是创建一个新的 `Request`，设置 `ctx`并返回
+
+### Write 与 WriteProxy
+
+1. Write 将 Request 转为标准的 http 包格式，只是 url 为相对路径
+2. WriteProxy 将 Request 转为标准 http 包格式，url 为绝对路径
+
+### Form
+
+```go
+var Form map[string][]string
+
+func (r *Request) FormValue(key string) string {
+	if r.Form == nil {
+		r.ParseMultipartForm(defaultMaxMemory)
+	}
+	if vs := r.Form[key]; len(vs) > 0 {
+		return vs[0]
+	}
+	return ""
+}
+```
+
+Form 包含 Value 和 File，没有 Parse 之前调用会报错；但可以通过 FormFile 或 FormValue 安全调用。
+
+### PostForm
+
+```go
+var PostForm map[string][]string
+
+func (r *Request) PostFormValue(key string) string {
+   if r.PostForm == nil {
+      r.ParseMultipartForm(defaultMaxMemory)
+   }
+   if vs := r.PostForm[key]; len(vs) > 0 {
+      return vs[0]
+   }
+   return ""
+}
+```
+
+和 Form 底层类型和相关方法类似，只不过存储的是 body 中的表单数据
+
+### MultipartForm
+
+```go
+type Form struct {
+	Value map[string][]string
+	File  map[string][]*FileHeader
+}
+
+func (r *Request) FormFile(key string) (multipart.File, *multipart.FileHeader, error) {
+   if r.MultipartForm == multipartByReader {
+	   return nil, nil, errors.New("http: multipart handled by MultipartReader")
+   }
+   if r.MultipartForm == nil {
+	   err := r.ParseMultipartForm(defaultMaxMemory)
+   if err != nil {
+	   return nil, nil, err
+   }
+   }
+   if r.MultipartForm != nil && r.MultipartForm.File != nil {
+	   if fhs := r.MultipartForm.File[key]; len(fhs) > 0 {
+		   f, err := fhs[0].Open()
+		   return f, fhs[0], err
+	   }
+   }
+   return nil, nil, ErrMissingFile
+}
+```
+
+Form.Value 只是一个临时数据载体，可以从 PostForm 和 Form 中使用到
+
+### MultipartReader
+
+```go
+func (r *Request) MultipartReader() (*multipart.Reader, error) {
+	if r.MultipartForm == multipartByReader {
+		return nil, errors.New("http: MultipartReader called twice")
+	}
+	if r.MultipartForm != nil {
+		return nil, errors.New("http: multipart handled by ParseMultipartForm")
+	}
+	r.MultipartForm = multipartByReader
+	return r.multipartReader(true)
+}
+```
+
+Go 允许开发者通过 `r.MultipartReader()` 来“接管”这个数据流，进行手动的、边读边处理的流式解析。一旦你调用了 `r.MultipartReader()`，Go 内部就会偷偷把 `r.MultipartForm` 赋值为这个 `multipartByReader` 哨兵变量
+
+### ParseMultipartForm
+
+```go
+func (r *Request) ParseMultipartForm(maxMemory int64) error {
+	if r.MultipartForm == multipartByReader {
+		return errors.New("http: multipart handled by MultipartReader")
+	}
+	var parseFormErr error
+	if r.Form == nil {
+		// Let errors in ParseForm fall through, and just
+		// return it at the end.
+		parseFormErr = r.ParseForm()
+	}
+	if r.MultipartForm != nil {
+		return nil
+	}
+
+	mr, err := r.multipartReader(false)
+	if err != nil {
+		return err
+	}
+
+	f, err := mr.ReadForm(maxMemory)
+	if err != nil {
+		return err
+	}
+
+	if r.PostForm == nil {
+		r.PostForm = make(url.Values)
+	}
+	for k, v := range f.Value {
+		r.Form[k] = append(r.Form[k], v...)
+		// r.PostForm should also be populated. See Issue 9305.
+		r.PostForm[k] = append(r.PostForm[k], v...)
+	}
+
+	r.MultipartForm = f
+
+	return parseFormErr
+}
+```
+
+1. 互斥检查：确认当前请求体是否已经被 MultipartReader（流式逐块读取器）接管。如果是，说明开发者选择了手动处理数据流，为了防止数据被二次读取破坏，直接返回互斥错误
+2. 如果 Form 为 nil，则解析 普通的 urlencoded 表单 和 URL 中的查询参数（报错但流程不终止）
+3. `mr.ReadForm`：
+   - 将普通的文本 Key-Value 提取出来
+   - 将文件数据读取并存储。在累积大小不超过 maxMemory 时放入内存；一旦越界，立即无缝切换，将剩余部分写入操作系统的临时磁盘文件中
+4. 视图合并与数据挂载
 
 ## Transport
 
