@@ -719,6 +719,8 @@ type Request struct {
     // 上下文（非常重要）
     ctx context.Context
 
+    Response *Response
+
     // 还有 RemoteAddr, TLS, RequestURI 等...
 }
 ```
@@ -731,6 +733,7 @@ type Request struct {
    - 当 URL 中有 key=A，Body 中也有 key=B 时，r.Form["key"] 的结果是 []string{"B", "A"}
 5. `PostForm` 仅包含 POST 表单数据
 6. `MultipartForm` 专为 `multipart/form-data` 设计
+7. `Response` 记录是哪一个重定向响应，导致了当前这个新请求的诞生
 
 Request 设计思路为数据的载体，由 Client 发送出去
 
@@ -974,6 +977,55 @@ func (r *Request) ParseMultipartForm(maxMemory int64) error {
    - 将普通的文本 Key-Value 提取出来
    - 将文件数据读取并存储。在累积大小不超过 maxMemory 时放入内存；一旦越界，立即无缝切换，将剩余部分写入操作系统的临时磁盘文件中
 4. 视图合并与数据挂载
+
+## Response
+
+```go
+type Response struct {
+	Status     string // e.g. "200 OK"
+	StatusCode int    // e.g. 200
+	Proto      string // e.g. "HTTP/1.0"
+	ProtoMajor int    // e.g. 1
+	ProtoMinor int    // e.g. 0
+
+	Header Header
+
+	Body io.ReadCloser
+
+	ContentLength int64
+
+	TransferEncoding []string
+
+	Close bool
+
+	Uncompressed bool
+
+	Trailer Header
+
+	Request *Request
+
+	TLS *tls.ConnectionState
+}
+```
+
+1. `Body` 保证永远不为 nil，空内容读取会返回 EOF，读取结束后必须手动调用 `Body.Close`（如果不读取完并关闭它，Go 默认的 HTTP 传输层 (Transport) 就无法复用底层的 TCP 连接（Keep-Alive 失效），这在高并发场景下会导致严重的资源泄漏。）
+   - 需要将 Body 传递给 接收Reader接口的函数去使用即可
+2. `Header` Go 会自动将 Key 规范化
+3. `ContentLength` 响应内容长度，如果为 -1 则长度未知（chunk 传输）
+4. `Trailer` 尾部 Header，只有在完全读完 Body 并遇到 io.EOF 之后，才能读取到这里的值
+5. `Uncompressed` 标记是否采取压缩
+6. `Request` 指向的是谁发出的请求导致本次响应产生
+
+Go 的 `http.Response` 并不是把所有数据“完全下载并打包”后才返回的，它是流式的
+- 只要 Go 从网络连接中读到了状态码（如 200 OK）和初始的 HTTP Header，它就会立刻组装出 http.Response 结构体并返回给你。
+- 此时，resp.Body 只是一个连接着底层 TCP Socket 的“水管”。真正的 Body 数据还在网络电缆里传输
+
+### 方法
+
+1. `Cookies()` 会自动遍历 resp.Header，把所有的 Set-Cookie 提取出来，并解析成 Go 语言中易于操作的 *http.Cookie 结构体切片
+2. `Location()` 当 HTTP 状态码是 3xx（如 301 永久重定向，302 临时重定向）或者 201 (Created) 时，服务器通常会在响应头中带上一个 Location 字段
+3. `ProtoAtLeast()` 用来检查当前响应的 HTTP 协议版本是否大于或等于指定的版本
+4. `Write()` 将整个 http.Response 对象（包括状态行、Header、Body）重新序列化（打包）成标准的 HTTP/1.x 文本格式
 
 ## Transport
 
