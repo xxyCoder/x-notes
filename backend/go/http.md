@@ -1060,239 +1060,384 @@ type Transport struct {
 }
 ```
 
-### 连接池
+1. `MaxIdleConns` 控制整个 Transport 维护的最大空闲连接总数。超过这个数量的空闲连接会被立刻关闭
+2. `MaxIdleConnsPerHost` 控制每个 Host 保留的最大空闲连接数。这是高并发调优最核心的参数。默认值通常只有 2
+3. `MaxConnsPerHost` 限制每个 Host 的最大并发连接数（包括正在使用的活跃连接和空闲连接）。达到上限后，新的请求会阻塞等待。设为 0 表示不限制。
+4. `IdleConnTimeout` 空闲连接的超时时间。如果一个连接放在池子里超过这个时间没被用，就会被关闭释放。
+5. `DialContext` 自定义建立底层 TCP 连接的逻辑。通常用于设置 TCP 连接级别的超时时间
+6. `ResponseHeaderTimeout` 从发送完请求后，到接收到服务端响应头的超时时间。这是防止下游服务"夯死"（只建立连接但不返回数据）的重要防线。
+
+### RoundTrip
+
+1. 彻底的读写分离
+   - 本身不直接操作底层 Socket 的读写。当获取到连接 (persistConn) 后，底层实际上会常驻两个独立的 Goroutine：readLoop（专职从服务端读数据）和 writeLoop（专职向服务端写数据）。roundTrip 只负责把请求通过 Channel 扔给 writeLoop，然后在 select 里死等 readLoop 把响应送回来。
+   - 主业务代码永远不会因为网络底层的夯死而被卡住
+2. 极其保守的“防御性”重试策略
+   - 零写入： 确认连一个字节都还没发出去，直接重试。
+   - 幂等性保护： 必须是 GET、HEAD、OPTIONS 等幂等方法，或者带有幂等 Key（Header 字段：Idempotency-Key 或 X-Idempotency-Key）
+   - Body 可倒带： 重试需要重新发送 Body，它要求 Request 必须提供 GetBody 函数来重置数据流，否则无法重试
+3. 资源复用
+   - roundTrip 内部强依赖 getConn 方法。这个方法的核心是“能复用绝不新建”
+
+#### getConn
 
 ```go
-func GetConn() {
+func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (_ *persistConn, err error) {
+	req := treq.Request
+	trace := treq.trace // 获取 httptrace，用于做性能打点（如 DNS耗时、TCP建连耗时 等监控）
+	ctx := req.Context()
+
+	// 如果外部注册了 httptrace.GetConn 钩子，在这里触发回调，通知业务层“准备开始获取连接了”
+	if trace != nil && trace.GetConn != nil {
+		trace.GetConn(cm.addr())
+	}
+
+	// 【核心设计：Context 脱离与防泄漏】
+	// Detach from the request context's cancellation signal.
+	// 这是一个非常精妙的细节（使用了 context.WithoutCancel）：
+	// 假设用户发起了请求，但瞬间因为超时或主动点击取消（req.ctx 被 cancel）。
+	// 如果底层正在进行耗时的 TCP 握手，直接中断丢弃是非常浪费网络资源的。
+	// 所以这里强行把拨号的 Context (dialCtx) 和请求的 Context (ctx) 的取消信号解绑，但保留了 Value。
+	// 这样即使当前请求被取消，底层的 TCP 建连依然会默默完成，建好后直接放入空闲连接池，造福下一个请求。
+	dialCtx, dialCancel := context.WithCancel(context.WithoutCancel(ctx))
+
+	// 构建一个“寻连意图”对象 (wantConn)
+	// 它就像一个排队号码牌，代表当前这个 Goroutine 正在急切地等待一个可用的底层连接
 	w := &wantConn{
 		cm:         cm,
-		key:        cm.key(),
-		ctx:        dialCtx,
-		cancelCtx:  dialCancel,
-		result:     make(chan connOrError, 1),
-		beforeDial: testHookPrePendingDial,
-		afterDial:  testHookPostPendingDial,
+		key:        cm.key(),        // 作为去 LRU 缓存池里捞连接的 Key (例如: https|api.example.com)
+		ctx:        dialCtx,         // 脱离了用户取消信号的拨号 Context
+		cancelCtx:  dialCancel,      // 用于内部主动取消拨号的函数
+		result:     make(chan connOrError, 1), // 【关键管道】：容量为 1，用于异步接收最终拿到的连接或错误
+		beforeDial: testHookPrePendingDial,    // 测试钩子
+		afterDial:  testHookPostPendingDial,   // 测试钩子
 	}
-  	// Queue for idle connection.
+
+	// 兜底防御机制：如果获取连接的整个过程发生任何错误退出，
+	// 必须调用 w.cancel(t) 将自己从等待队列中注销，防止造成内存泄漏或死锁
+	defer func() {
+		if err != nil {
+			w.cancel(t)
+		}
+	}()
+
+	// 【连接池调度的核心分流】
+	// 第一步：尝试去“空闲连接池 (idleConn)”里拿复用的连接。
+	// queueForIdleConn 不仅是去池子里找，如果池子当前没货，它还会把 w 挂在等待队列里 (idleConnWait)。
 	if delivered := t.queueForIdleConn(w); !delivered {
+		// 第二步：如果没拿到复用连接，则进入拨号队列 (queueForDial)，准备新建 TCP 连接。
+		// 注意：queueForDial 内部受到 MaxConnsPerHost 的严格限制。
+		// 如果并发数没超限，它会立刻启动一个新的 Goroutine 去走底层 TCP/TLS 握手。
 		t.queueForDial(w)
 	}
-}
 
+	// 【CSP 模型：死等结果】
+	// 上面的排队和拨号动作全部是异步派发出去的，当前主协程在这里通过 select 阻塞等待最终命运。
+	select {
+	case r := <-w.result:
+		// 命运1：w.result 管道响了！
+		// 可能是拨号 Goroutine 成功连上了，也可能是某个刚用完连接的兄弟把空闲连接通过管道扔给了我。
+		
+		// 性能打点：记录拿到连接的成功事件 (仅限 HTTP/1)
+		if r.pc != nil && r.pc.alt == nil && trace != nil && trace.GotConn != nil {
+			info := httptrace.GotConnInfo{
+				Conn:   r.pc.conn,
+				Reused: r.pc.isReused(), // 告诉业务层：这个连接是被复用的，还是新鲜刚建立的
+			}
+			if !r.idleAt.IsZero() {
+				info.WasIdle = true
+				info.IdleTime = time.Since(r.idleAt)
+			}
+			trace.GotConn(info)
+		}
+		
+		// 如果管道传回来的不仅有连接，还有错误
+		if r.err != nil {
+			// 如果走到这里，通常是因为底层的拨号过程失败了。
+			// 但有一种特殊竞态：此时用户的 ctx 也刚好被取消了。
+			// 为了给用户最直观的反馈（告诉用户是你主动取消的，而不是网络断了），做一次 select 抢占判断。
+			select {
+			case <-treq.ctx.Done():
+				err := context.Cause(treq.ctx)
+				if err == errRequestCanceled {
+					err = errRequestCanceledConn // "net/http: request canceled while waiting for connection"
+				}
+				return nil, err
+			default:
+				// 并不是用户取消的，原原本本返回底层拨号的真实错误（如 dns 解析失败、tcp 拒绝连接）
+			}
+		}
+		
+		// 大功告成，返回拿到的底层持久化连接 pc (persistConn)
+		return r.pc, r.err
+
+	case <-treq.ctx.Done():
+		// 命运2：用户的 Context 响了！
+		// 在我们苦苦排队等连接或者等 TCP 握手的漫长过程中，用户设置的超时时间到了，或者用户调用了 cancel()。
+		// 此时直接不等了，截获错误并立刻返回给上层，实现对超时的“秒级”响应。
+		err := context.Cause(treq.ctx)
+		if err == errRequestCanceled {
+			err = errRequestCanceledConn
+		}
+		// 返回前，之前 defer 的 w.cancel(t) 会被执行，负责去底层队伍里把这个号码牌作废。
+		return nil, err
+	}
+}
+```
+
+1. 先去空闲连接池中找空闲连接，如果没有则挂入等待队列并进入新函数产生申请连接（追求极致低延迟而设计的“双轨赛跑”机制。）
+2. 排队和拨号动作全部是异步派发出去的，当前主协程在这里通过 select 阻塞等待最终命运
+
+#### queueForIdleConn
+
+```go
 func (t *Transport) queueForIdleConn(w *wantConn) (delivered bool) {
-	if t.DisableKeepAlives { // 没开启keep alive则直接返回false，不允许复用连接
+	// 场景1：如果配置了禁用 Keep-Alive，直接返回 false，不复用，也不排队等复用。
+	if t.DisableKeepAlives {
 		return false
 	}
 
-	t.idleMu.Lock() // 加锁，只允许一个goroutine去修改idleConn等字段
+	// 锁住整个空闲连接池 (idleConn) 和 等待队列 (idleConnWait)
+	// 这是一个全局锁，所以里面的操作必须极其轻量且快速
+	t.idleMu.Lock()
 	defer t.idleMu.Unlock()
 
+	// 撤销清理指令。如果之前有人调了 CloseIdleConnections() 让系统准备关停，
+	// 现在既然又有新请求进来要拿连接了，赶紧把“关门歇业”的牌子摘了。
 	t.closeIdle = false
+
+	if w == nil {
+		// 仅用于内部测试钩子，常规流程不会触发
+		return false
+	}
+
+	// 【过期审查准备】计算一个“最老允许时间”
+	// 如果配置了空闲超时 (IdleConnTimeout)，我们就算出一个时间基准线 oldTime。
+	// 比如当前是 12:00，超时设置是 90秒，那 oldTime 就是 11:58:30。
+	// 任何闲置时间早于这个 oldTime 的连接，统统视为“过期”。
 	var oldTime time.Time
 	if t.IdleConnTimeout > 0 {
 		oldTime = time.Now().Add(-t.IdleConnTimeout)
 	}
 
-	if list, ok := t.idleConn[w.key]; ok { // 根据scheme、url组成的str去获取对应的空闲队列，从而复用连接（这样被连接方的tcp都是不变的）
+	// 【核心动作 1：去缓存池里拿】
+	// 通过当前请求的 Key（比如 https|api.example.com）去找对应的空闲连接列表
+	if list, ok := t.idleConn[w.key]; ok {
 		stop := false
 		delivered := false
+		
+		// 只要列表里还有连接，并且还没成功拿到，就一直循环找
 		for len(list) > 0 && !stop {
+			// 【极其重要的细节：LIFO (后进先出) / MRU (最近最常使用)】
+			// 注意这里的索引是 len(list)-1，也就是总是拿列表里**最后一个**放进去的连接。
+			// 为什么？因为最近刚放回来的连接，它是“热乎”的，底层的 TCP 还没被操作系统或 NAT 路由器掐断的概率最大！
 			pconn := list[len(list)-1]
 
+			// 审查1：是否太老了？（闲置太久）
 			tooOld := !oldTime.IsZero() && pconn.idleAt.Round(0).Before(oldTime)
 			if tooOld {
+				// 异步清理：如果太老了，开一个 Goroutine 去温柔地关闭底层的 Socket。
+				// 为什么异步？因为现在持有 t.idleMu 全局锁，直接调 Close 会阻塞，影响全局性能。
 				go pconn.closeConnIfStillIdle()
 			}
-			if pconn.isBroken() || tooOld { // 连接太老或者坏了就需要移除
+			
+			// 审查2：连接是否已经损坏 (Broken) 或者 太老 (tooOld)？
+			if pconn.isBroken() || tooOld {
+				// 这个连接是个废品！
+				// 把它从当前列表的尾部切掉 (切片缩容)，然后 continue 进去下一轮循环，检查倒数第二个。
 				list = list[:len(list)-1]
 				continue
 			}
-			delivered = w.tryDeliver(pconn, nil, pconn.idleAt) // 尝试请求，如果当前请求已经完成了就返回false（比如其他情况抢先把请求完成）
+			
+			// 审查通过！这是一个好连接！尝试把它交付给我们的请求。
+			// tryDeliver 会通过 Channel 把 pconn 塞给 w.result
+			delivered = w.tryDeliver(pconn, nil, pconn.idleAt)
 			if delivered {
-				if pconn.alt != nil { // h2可共享连接，不需要移除
-					// HTTP/2: multiple clients can share pconn.
-					// Leave it in the list.
-				} else { // h1独占连接，需要移除避免给其他连接复用
-					// HTTP/1: only one client can use pconn.
-					// Remove it from the list.
+				if pconn.alt != nil {
+					// HTTP/2 逻辑：多路复用，一个连接可以给多个人用。
+					// 所以拿到了也不把它从空闲池里踢出去，留在里面造福后续请求。
+				} else {
+					// HTTP/1 逻辑：独占式连接。
+					// 既然被当前请求拿走了，就要从 LRU 缓存和空闲列表中彻底抹除。
 					t.idleLRU.remove(pconn)
 					list = list[:len(list)-1]
 				}
 			}
-			stop = true
+			stop = true // 拿到或者尝试交付过了，停止淘宝循环
 		}
+		
+		// 循环结束后的收尾工作：更新挂在字典上的切片
 		if len(list) > 0 {
-			t.idleConn[w.key] = list
+			t.idleConn[w.key] = list // 列表里还有剩的，保存回去
 		} else {
-			delete(t.idleConn, w.key)
+			delete(t.idleConn, w.key) // 全被挑空了（或者全馊了），直接删掉这个 Key
 		}
+		
+		// 如果成功拿到了现货，直接带着胜利的果实返回 true
 		if stop {
 			return delivered
 		}
 	}
 
-	// Register to receive next connection that becomes idle.
+	// 【核心动作 2：拿不到现货，被迫“拿号排队”】
+	// 运行到这里，说明池子里真的没货了（或者有货但都被删了）。
+	// 此时我们要把当前请求 (w) 注册到等待队列中。
 	if t.idleConnWait == nil {
 		t.idleConnWait = make(map[connectMethodKey]wantConnQueue)
 	}
+	
+	// 找到当前域名对应的等待队列
 	q := t.idleConnWait[w.key]
+	
+	// 队列清理：把排在队头、但实际上已经等不急取消了的（Context Canceled）请求踢出去
 	q.cleanFrontNotWaiting()
-	q.pushBack(w) // 没获取到就放入等待队列
+	
+	// 把当前请求挂到队伍的最末尾
+	q.pushBack(w)
+	
+	// 更新字典里的队伍
 	t.idleConnWait[w.key] = q
-	return false // 返回false，尝试
+	
+	// 凄凉地返回 false，告诉外层：“我没立刻拿到，但我已经排上号了”
+	return false
 }
+```
 
+1. 为当前的请求 (wantConn w) 寻找一个空闲连接。
+2. 它的返回值 delivered 告诉你，是否“当场”就成功交付了一个空闲连接，如果返回 false，说明没拿到，并且 w 已经被加入到了等待队列中。
+
+#### queueForDial
+
+```go
 func (t *Transport) queueForDial(w *wantConn) {
+	// 测试钩子：用于在单元测试中确认拨号请求是否进入了队列
 	w.beforeDial()
 
+	// 极其关键：锁住“单机并发连接数”的计数器
+	// 为了防止瞬间并发几万个请求把目标服务器或者本机的端口打满，这里必须严格控制
 	t.connsPerHostMu.Lock()
 	defer t.connsPerHostMu.Unlock()
 
+	// 场景 1：如果你根本没设置 MaxConnsPerHost (默认值是 0，表示不限制)
 	if t.MaxConnsPerHost <= 0 {
+		// 直接新开一个 Goroutine 去底层拨号
 		t.startDialConnForLocked(w)
 		return
 	}
 
-	if n := t.connsPerHost[w.key]; n < t.MaxConnsPerHost { // 如果没超过限制就开始拨号，不等空闲连接
+	// 场景 2：设置了限制，检查当前这个域名 (w.key) 已经建立或正在建立的连接总数 n
+	if n := t.connsPerHost[w.key]; n < t.MaxConnsPerHost {
+		// 如果还没达到上限，初始化字典（如果是第一次）
 		if t.connsPerHost == nil {
 			t.connsPerHost = make(map[connectMethodKey]int)
 		}
+		// 计数器 +1 (代表我占用了一个名额)
 		t.connsPerHost[w.key] = n + 1
+		
+		// 绿灯！去拨号吧
 		t.startDialConnForLocked(w)
 		return
 	}
 
+	// 场景 3：红灯！当前域名的连接数已经达到 MaxConnsPerHost 上限了！
+	// 你不能去拨号了，会引发雪崩的。你必须在这里排队，等别人把连接彻底销毁（或者复用给你）。
 	if t.connsPerHostWait == nil {
 		t.connsPerHostWait = make(map[connectMethodKey]wantConnQueue)
 	}
+	
+	// 获取当前域名的“拨号等待队列”
 	q := t.connsPerHostWait[w.key]
+	
+	// 防御性清理：把队头那些已经不耐烦（超时或被用户 Cancel）的死请求踢出队列
 	q.cleanFrontNotWaiting()
+	
+	// 委屈地把自己加到等待拨号的队伍末尾
 	q.pushBack(w)
 	t.connsPerHostWait[w.key] = q
+	
+	// 注意：这里函数就结束了。
+	// w 只能安静地在队列里等。当某个占着名额的连接被关闭时 (调用 t.decConnsPerHost)，
+	// 那个关闭连接的 Goroutine 会负责把 w 叫醒，并给它放行。
 }
 
+// 附带看一下放行逻辑：startDialConnForLocked
+// t.connsPerHostMu 必须在调用前被锁住
+func (t *Transport) startDialConnForLocked(w *wantConn) {
+	// 记录正在进行中的拨号任务
+	t.dialsInProgress.cleanFrontCanceled()
+	t.dialsInProgress.pushBack(w)
+	
+	// 【核心动作】：开一个新的 Goroutine 去执行真正的拨号！
+	// 为什么一定要新开 Goroutine？
+	// 因为 dialConn 底层要进行 DNS 解析、TCP 三次握手、TLS 握手，可能要耗费几百毫秒。
+	// 绝对不能让它阻塞当前正在调度的主流程！
+	go func() {
+		// 去执行底层的网络建连，并把建好的连接送给 w
+		t.dialConnFor(w)
+		
+		// 拨号结束（无论是成功还是失败），把用于取消拨号的 context 置空
+		t.connsPerHostMu.Lock()
+		defer t.connsPerHostMu.Unlock()
+		w.cancelCtx = nil
+	}()
+}
+```
+
+1. `MaxConnsPerHost` 管的是“工作时”（活跃/并发期）：当前这台机器最多能同时发起多少个真正的网络交互。 
+2. `MaxIdleConnsPerHost` 管的是“休息时”（长连接池）：当这些交互打完收工后，我愿意在内存里“白养”多少个闲人（空闲连接）等下一个任务。
+
+#### tryPutIdleConn
+
+```go
 func (t *Transport) tryPutIdleConn(pconn *persistConn) error {
-	if t.DisableKeepAlives || t.MaxIdleConnsPerHost < 0 { // 没开启或者MaxIdleConnsPerHost小于0，就不考虑连接复用
-		return errKeepAlivesDisabled
+	// 【第 1 关：基础拦截】
+	// 如果全局不让复用，或者底层的 TCP 已经被标记为损坏 (比如收到了 EOF)
+	if t.DisableKeepAlives || pconn.isBroken() {
+		return errKeepAlivesDisabled // 拒收，外层会把它物理断开
 	}
-	if pconn.isBroken() {
-		return errConnBroken
-	}
-	pconn.markReused()
 
 	t.idleMu.Lock()
 	defer t.idleMu.Unlock()
 
-	if pconn.alt != nil && t.idleLRU.m[pconn] != nil {
-		return nil
+	// 【第 2 关：排队截胡 (Late Binding)】
+	// 如果当前域名的等待队列里有人，并且队列没空
+	if q, ok := t.idleConnWait[pconn.cacheKey]; ok && q.len() > 0 {
+		w := q.popFront()        // 揪出排在最前面的那个请求
+		w.tryDeliver(pconn, ...) // 直接把连接塞给它！
+		return nil               // 移交成功，连接没有“闲置”，直接结束
 	}
 
-	key := pconn.cacheKey
-	if q, ok := t.idleConnWait[key]; ok { // 从等待空闲连接中取请求
-		done := false
-		if pconn.alt == nil {
-			// HTTP/1.
-			// Loop over the waiting list until we find a w that isn't done already, and hand it pconn.
-			for q.len() > 0 {
-				w := q.popFront()
-				if w.tryDeliver(pconn, nil, time.Time{}) {
-					done = true
-					break
-				}
-			}
-		} else {
-			// HTTP/2.
-			// 连接可以复用，不需要跳出
-			for q.len() > 0 {
-				w := q.popFront()
-				w.tryDeliver(pconn, nil, time.Time{})
-			}
-		}
-		if q.len() == 0 {
-			delete(t.idleConnWait, key)
-		} else {
-			t.idleConnWait[key] = q
-		}
-		if done {
-			return nil
-		}
-	}
-
+	// 【第 3 关：清场指令检查】
+	// 如果业务方刚调了 CloseIdleConnections()，当前不收留任何准备闲置的连接
 	if t.closeIdle {
-		return errCloseIdle
+		return errCloseIdle 
 	}
-	if t.idleConn == nil {
-		t.idleConn = make(map[connectMethodKey][]*persistConn)
+
+	// 【第 4 关：单机限流 (防拥挤)】
+	idles := t.idleConn[pconn.cacheKey]
+	if len(idles) >= t.MaxIdleConnsPerHost {
+		return errTooManyIdleHost // 满了，拒收当前连接
 	}
-	idles := t.idleConn[key]
-	if len(idles) >= t.maxIdleConnsPerHost() {
-		return errTooManyIdleHost
-	}
-	for _, exist := range idles {
-		if exist == pconn {
-			log.Fatalf("dup idle pconn %p in freelist", pconn)
-		}
-	}
-	t.idleConn[key] = append(idles, pconn)
-	t.idleLRU.add(pconn) // idleLRU管理整个空闲连接，剔除 MaxIdleConns 的数量
+
+	// === 通过所有考验，正式入池 ===
+	t.idleConn[pconn.cacheKey] = append(idles, pconn) // 存入单机切片 (LIFO)
+
+	// 【第 5 关：全局淘汰 (末位淘汰)】
+	t.idleLRU.add(pconn) // 记录到全局 LRU 链表的头部（最热乎）
+	
+	// 如果全局空闲数超标了
 	if t.MaxIdleConns != 0 && t.idleLRU.len() > t.MaxIdleConns {
-		oldest := t.idleLRU.removeOldest()
-		oldest.close(errTooManyIdle)
-		t.removeIdleConnLocked(oldest)
+		oldest := t.idleLRU.removeOldest() // 从尾部揪出那个最老的连接
+		oldest.close()                     // 物理关闭它
+		t.removeIdleConnLocked(oldest)     // 把它从对应的单机切片里抹除
 	}
 
-	if t.IdleConnTimeout > 0 && pconn.alt == nil {
-		if pconn.idleTimer != nil {
-			pconn.idleTimer.Reset(t.IdleConnTimeout)
-		} else {
-			pconn.idleTimer = time.AfterFunc(t.IdleConnTimeout, pconn.closeConnIfStillIdle)
-		}
-	}
-	pconn.idleAt = time.Now()
-	return nil
-}
-
-func (t *Transport) decConnsPerHost(key connectMethodKey) {
-	if t.MaxConnsPerHost <= 0 {
-		return
+	// 【第 6 关：埋下定时炸弹】
+	if t.IdleConnTimeout > 0 {
+		// 时间一到，触发 closeConnIfStillIdle 函数，把连接干掉
+		pconn.idleTimer = time.AfterFunc(t.IdleConnTimeout, pconn.closeConnIfStillIdle)
 	}
 
-	t.connsPerHostMu.Lock()
-	defer t.connsPerHostMu.Unlock()
-	n := t.connsPerHost[key]
-	if n == 0 {
-		panic("net/http: internal error: connCount underflow")
-	}
-
-	if q := t.connsPerHostWait[key]; q.len() > 0 { // 减少连接数量，也就意味着在等待去请求新连接的请求可以发起连接了
-		done := false
-		for q.len() > 0 {
-			w := q.popFront()
-			if w.waiting() {
-				t.startDialConnForLocked(w)
-				done = true
-				break
-			}
-		}
-		if q.len() == 0 {
-			delete(t.connsPerHostWait, key)
-		} else {
-			// q is a value (like a slice), so we have to store
-			// the updated q back into the map.
-			t.connsPerHostWait[key] = q
-		}
-		if done {
-			return
-		}
-	}
-
-	// Otherwise, decrement the recorded count.
-	if n--; n == 0 {
-		delete(t.connsPerHost, key)
-	} else {
-		t.connsPerHost[key] = n
-	}
+	return nil // 完美归池
 }
 ```
-
-`tryPutIdleConn` 是在连接“工作完想休息”时调用的，而 `decConnsPerHost` 是在连接“彻底报废”时调用的
