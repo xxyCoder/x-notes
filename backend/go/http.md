@@ -542,8 +542,6 @@ type CookieJar interface {
 	Cookies(u *url.URL) []*Cookie
 }
 
-var DefaultClient = &Client{}
-
 // 简化
 func (c *Client) do(req *Request) (retres *Response, reterr error) {
     // 1. 防御性编程：如果 c 为 nil 立即 panic，避免后续深层报错
@@ -585,9 +583,9 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
             // 执行用户自定义的重定向策略（比如限制最多 10 次）
             err := c.checkRedirect(req, reqs)
 	  
-   	    if err == ErrUseLastResponse {
-		return resp, nil // 不能先关闭Body，否则后续拿不到
-	    }
+           if err == ErrUseLastResponse {
+               return resp, nil // 不能先关闭Body，否则后续拿不到
+           }
   
 
             // 为了复用 TCP 连接：如果响应体很小，把它读完丢弃比直接关闭更划算
@@ -597,13 +595,13 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
             }
             resp.Body.Close() // 必须关闭旧的响应体
 
-	    if err != nil {
-		// The resp.Body has already been closed.
-		ue := uerr(err)
-		ue.(*url.Error).URL = loc
-		return resp, ue
-	     }
-        }
+           if err != nil {
+			   // The resp.Body has already been closed. 
+			   ue := uerr(err)
+			   ue.(*url.Error).URL = loc
+			   return resp, ue
+		   }
+		}
 
         // --- B. 发送网络请求 ---
         reqs = append(reqs, req)
@@ -646,35 +644,9 @@ func (c *Client) send(req *Request, deadline time.Time) (resp *Response, didTime
 }
 ```
 
-在 HTTP/1.1 中，如果你想 **复用** （Reuse）同一个 TCP 连接发送下一个请求（Keep-Alive），你必须保证前一个请求的响应体已经被 **完全读取完毕** ，**如果不读完直接 Close** ：底层的 TCP 连接会因为还有残留数据没处理，而被强制关闭并丢弃
+在 HTTP/1.1 中，如果你想 **复用** （Reuse）同一个 TCP 连接发送下一个请求（Keep-Alive），你必须保证前一个请求的响应体已经被 **完全读取完毕** ，**如果不读完直接 Close** ，底层的 TCP 连接会因为还有残留数据没处理，而被强制关闭并丢弃
 
 对于 `Timeout`，最后会通过 `WithDealineContext`存储在req.ctx中
-
-```go
-req.ctx, cancelCtx = context.WithDeadline(oldCtx, deadline)
-// ...
-if !deadline.IsZero() {
-	resp.Body = &cancelTimerBody{
-		stop:          cancelCtx,
-		rc:            resp.Body,
-		reqDidTimeout: func() bool { return time.Now().After(deadline) },
-	}
-}
-
-func (b *cancelTimerBody) Read(p []byte) (n int, err error) {
-	n, err = b.rc.Read(p)
-	if err == nil {
-		return n, nil
-	}
-	if err == io.EOF {
-		return n, err
-	}
-	if b.reqDidTimeout() { // 所以Timeout超时是从请求发出到响应体Body读取完不能超过Timeout
-		err = &timeoutError{err.Error() + " (Client.Timeout or context cancellation while reading body)"}
-	}
-	return n, err
-}
-```
 
 其他方法比如 `Get`、`Post`和 `PostForm`都是对 `Do`的封装调用
 
