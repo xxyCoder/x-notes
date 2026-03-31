@@ -2,9 +2,25 @@
 
 ```go
 type emptyCtx struct{}
+
+func (emptyCtx) Deadline() (deadline time.Time, ok bool) {
+	return
+}
+
+func (emptyCtx) Done() <-chan struct{} {
+	return nil
+}
+
+func (emptyCtx) Err() error {
+	return nil
+}
+
+func (emptyCtx) Value(key any) any {
+	return nil
+}
 ```
 
-一个空结构体不占据内存大小，并且返回的地址为 “zerobase"
+一个空结构体不占据内存大小，实现了多个方法（名副其实，真正做到了“无为而治”），并且返回的地址为 “zerobase"
 
 ```go
 package main
@@ -25,18 +41,19 @@ func main() {
 
 ### zerobase
 
-1. 为什么会有zerobase?
+1. 为什么会有 zerobase?
 
    * 如果每次创建一个不占空间的对象，都需要在堆上分配一个内存空间，比较浪费内存和cpu
-2. 什么情况下会返回zerobase?
+2. 什么情况下会返回 zerobase?
 
    * 只有被分配在堆上，并且占据大小为0，空对象在结构体中不是最后一个的情况（地址等于下一个字段的地址）
-3. 什么情况下不会返回zerobase?
+3. 例外
 
    * 当对象在结构体中末尾（会单独分配一个字节内存，这是因为末尾需要撑开一个字节，避免访问末尾空对象指针，导致返回到下一内存地址真正的对象）
      * 假设你在内存里连续创建了两个对象：`d1` (Data) 和 `d2` (其他对象)
      * 如果没有填充，`&d1.d` 的地址恰好就是 `&d2` 的起始地址，这时候，如果你把 `&d1.d` 这个指针传给了某个函数。
      * **垃圾回收器（GC）** 扫描到这个指针时，它会认为： **“哦！有人在引用 `d2` 对象！”** 。
+		 * 其次，不能让末尾空对象指向 zerobase，否则这会彻底破坏 Go 语言中最核心的“结构体连续内存分布”原则
    * ```go
      package main
 
@@ -94,6 +111,11 @@ type cancelCtx struct {
 	cause    error                 // set to non-nil by the first cancel call
 }
 
+type canceler interface {
+	cancel(removeFromParent bool, err, cause error)
+	Done() <-chan struct{}
+}
+
 func (c *cancelCtx) Done() <-chan struct{} {
     d := c.done.Load() // 快速路径，强制从内存或/L1 cache读
     if d != nil {
@@ -109,9 +131,10 @@ func (c *cancelCtx) Done() <-chan struct{} {
     return d.(chan struct{})
 }
 ```
-
-1. `done` 这里是一个非常经典的性能优化。标准库没有直接使用 chan struct{}，而是用了原子值。为了避免互斥锁的高昂开销以及实现无锁的快速读取
-2. `children` 这是一个 Set 结构（用 map 模拟）。当父节点取消时，它需要遍历这个 map，递归地调用所有子节点的 `cancel` 方法。这就是“父死子必死”的实现基础
+1. Context 的核心设计理念就是并发安全，它生来就是要被跨 Goroutine 传递的。这把 `mu` 主要保护的是 `cancelCtx` 内部的几个核心可变状态，尤其是树形结构的拓扑变化和取消状态的单次流转
+2. `done` 这里是一个非常经典的性能优化。标准库没有直接使用 chan struct{}，而是用了原子值。为了避免互斥锁的高昂开销以及实现无锁的快速读取
+	- 实际会调用 for...select 死等 `Done` 完成，如果有多个 goroutine 则会疯狂争抢同一把锁，导致整个程序的性能因为上下文切换而断崖式下跌
+3. `children` 这是一个 Set 结构（用 map 模拟）。当父节点取消时，它需要遍历这个 map，递归地调用所有子节点的 `cancel` 方法。这就是“父死子必死”的实现基础
 
 ```go
 func WithCancel(parent Context) (ctx Context, cancel CancelFunc) {
@@ -124,8 +147,13 @@ func withCancel(parent Context) *cancelCtx {
 		panic("cannot create context from nil parent")
 	}
 	c := &cancelCtx{}
-	c.propagateCancel(parent, c) // 处理父context的Done相关后续逻辑
+	c.propagateCancel(parent, c) // 处理父 context 的 Done 相关后续逻辑
 	return c
+}
+
+type stopCtx struct {
+	Context
+	stop func() bool
 }
 
 func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
@@ -134,6 +162,7 @@ func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 	done := parent.Done()
 	if done == nil {
 		return // parent is never canceled
+		// 说明是普通的 context 比如 emptyCtx 就会返回 nil
 	}
 
 	select {
@@ -145,7 +174,7 @@ func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 		// 父节点没死，继续下一步
 	}
 
-	if p, ok := parentCancelCtx(parent); ok {
+	if p, ok := parentCancelCtx(parent); ok { // 向上找 确认是否为标准的 cancelCtx => p, ok := parent.Value(&cancelCtxKey).(*cancelCtx)
 		p.mu.Lock()
 		if err := p.err.Load(); err != nil {
 			// parent has already been canceled
@@ -161,8 +190,7 @@ func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 		return
 	}
 
-	if a, ok := parent.(afterFuncer); ok {
-		// parent implements an AfterFunc method.
+	if a, ok := parent.(afterFuncer); ok { // 实现了 AfterFunc 方法
 		c.mu.Lock()
 		stop := a.AfterFunc(func() {
 			child.cancel(false, parent.Err(), Cause(parent))
@@ -185,8 +213,8 @@ func (c *cancelCtx) propagateCancel(parent Context, child canceler) {
 }
 ```
 
-1. 最后开启goroutine进行阻塞等待parent节点完成（执行子节点取消），或者等子节点取消
-2. 额外加入了`AfterFunc`方法，目的是为了消除最后的goroutine
+1. 最后开启 goroutine 进行阻塞等待 parent 节点完成（执行子节点取消），或者等子节点自己取消
+2. 额外加入了 `AfterFunc` 方法，目的是为了消除最后的 goroutine
 
 ```go
 func (c *cancelCtx) cancel(removeFromParent bool, err, cause error) {
@@ -238,15 +266,12 @@ func removeChild(parent Context, child canceler) {
 }
 ```
 
-1. 取消子节点需要，`cancel`第一个值需要传递false，避免子节点又把自己从parent节点移除（移除需要加parent的锁），从而避免死锁
+1. 调用取消方法后，需要关闭 done 通道，调用子 context 的 cancel，再把自己从父 context 的 map 中移除
+2. 取消子节点需要 `cancel`第一个值需要传递 false，避免子节点又把自己从 parent 节点移除（移除需要加 parent 的锁），从而避免死锁
 
 ## afterFuncCtx
 
 ```go
-type afterFuncer interface {
-    AfterFunc(func()) func() bool
-}
-
 type afterFuncCtx struct {
     cancelCtx
     once sync.Once // either starts running f or stops f from running
@@ -257,7 +282,7 @@ func AfterFunc(ctx Context, f func()) (stop func() bool) {
 	a := &afterFuncCtx{
 		f: f,
 	}
-	a.cancelCtx.propagateCancel(ctx, a)
+	a.cancelCtx.propagateCancel(ctx, a) // ctx -> stopCtx -> a
 	return func() bool {
 		stopped := false
 		a.once.Do(func() {
@@ -271,7 +296,7 @@ func AfterFunc(ctx Context, f func()) (stop func() bool) {
 }
 
 func (a *afterFuncCtx) cancel(removeFromParent bool, err, cause error) {
-	a.cancelCtx.cancel(false, err, cause)
+	a.cancelCtx.cancel(false, err, cause) // 保证了当 a.f() 开始跑的时候，任何人去查这个 Context，它的状态都是结束的
 	if removeFromParent {
 		removeChild(a.Context, a)
 	}
