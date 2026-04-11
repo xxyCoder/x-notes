@@ -30,6 +30,7 @@ type Buffer struct {
 1. 有个匿名嵌套字段，存储最终 JSON 字节流的物理容器
 2. `ptrSeen` 用来模拟 set 数据结构，其中 key 存储的是内存指针，避免循环应用导致死循环
 3. `ptrLevel` 是为了减少 map 中对 key 执行的hash、位置计算的操作，如果 ptrLevel 超过 `startDetectingCyclesAfter`后才会用`ptrSeen`判断是否有死循环
+4. encodeState 本质就是 `Marshal` 每次独立工作的上下文
 
 ## newEncodeState
 
@@ -158,6 +159,9 @@ func (e *encodeState) marshal(v any, opts encOpts) (err error) {
     return nil
 }
 
+type encoderFunc func(e *encodeState, v reflect.Value, opts encOpts)
+var encoderCache sync.Map // map[reflect.Type]encoderFunc
+
 func typeEncoder(t reflect.Type) encoderFunc {
     if fi, ok := encoderCache.Load(t); ok {
         return fi.(encoderFunc)
@@ -232,7 +236,8 @@ func newStructEncoder(t reflect.Type) encoderFunc {
 }
 ```
 
-1. 昂贵反射算出来的全套字段信息，全都存进 se 这个实例里，然后将`se.encode`存储在`map`中从而实现“记忆类型”，后续相同的类型调用`Marshal`方法都可以避免重复序列化
+1. `encoderFunc` 它缓存的不是数据，而是函数指针/闭包。 第一次遇到某类型时，通过反射“编译”出一个专属函数；后续调用直接执行该函数，完全跳过反射。
+2. 昂贵反射算出来的全套字段信息，全都存进 se 这个实例里，然后将 `se.encode` 存储在 `map` 中从而实现“记忆类型”，后续相同的类型调用 `Marshal` 方法都可以避免重复序列化（字段都放在缓存中可直接获取）
 
 ## Unmarshal
 
@@ -311,6 +316,8 @@ func (d *decodeState) object(v reflect.Value) error {
     // ...
 }
 
+var fieldCache sync.Map // map[reflect.Type]structFields
+
 func cachedTypeFields(t reflect.Type) structFields {
     if f, ok := fieldCache.Load(t); ok {
         return f.(structFields)
@@ -320,7 +327,9 @@ func cachedTypeFields(t reflect.Type) structFields {
 }
 ```
 
-1. 先通过状态机完成零分配词法扫描，随后利用反射开启递归下降解析；在处理结构体时，预先提取并缓存各字段的物理内存偏移量，进而在循环读取 JSON 键值对时，精准算出目标字段的绝对内存地址，最后调用底层反射接口将字面量直接覆写进该区块
+1. 先通过状态机完成零分配词法扫描，随后利用反射开启递归下降解析（会利用 `fieldCache` 缓存字段）；在处理结构体时，预先提取并缓存各字段的物理内存偏移量，进而在循环读取 JSON 键值对时，精准算出目标字段的绝对内存地址，最后调用底层反射接口将字面量直接覆写进该区块
+2. interface{} 中的数字均转为 float64
+
 
 ## Encoder
 
