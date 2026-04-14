@@ -20,11 +20,13 @@ func (e CorruptInputError) Error() string {
 }
 ```
 
+`Encoding` 代表了一种特定的 Base64 编码规则
+
 1. `encode` 充当 索引到字符 的查询表，因为base64是6 bit一组，正好范围是0~63（2^6）
 2. `decodeMap` 充当 字符到索引 的查询表，因为一个ascii字符占1 bit，范围是0~255（2^8）
 3. `strict` 表示是否严格模式，如果是严格模式则解码器会严格检查这些未对齐的填充位是否真的为 0，如果不是，则直接抛出 `CorruptInputError` 错误（在解码时，如果数据长度不是 3 的倍数，我们在编码时会填充多余的零）
 
-## NewEncoding
+### NewEncoding
 
 ```go
 func NewEncoding(encoder string) *Encoding {
@@ -55,65 +57,8 @@ func NewEncoding(encoder string) *Encoding {
 
 1. `decodeMapInitialize` 是被定义为一个包含了 256 个 `\xff` 的字符串，用于检查`encoder`是否有重复的字符串
 
-## Encode
+### EncodeToString
 
-```go
-func (enc *Encoding) Encode(dst, src []byte) {
-	if len(src) == 0 {
-		return
-	}
-	// enc is a pointer receiver, so the use of enc.encode within the hot
-	// loop below means a nil check at every operation. Lift that nil check
-	// outside of the loop to speed up the encoder.
-	_ = enc.encode
-
-	di, si := 0, 0
-	n := (len(src) / 3) * 3
-	for si < n {
-		// Convert 3x 8bit source bytes into 4 bytes
-		val := uint(src[si+0])<<16 | uint(src[si+1])<<8 | uint(src[si+2])
-
-		dst[di+0] = enc.encode[val>>18&0x3F]
-		dst[di+1] = enc.encode[val>>12&0x3F]
-		dst[di+2] = enc.encode[val>>6&0x3F]
-		dst[di+3] = enc.encode[val&0x3F]
-
-		si += 3
-		di += 4
-	}
-
-	remain := len(src) - si
-	if remain == 0 {
-		return
-	}
-	// Add the remaining small block
-	val := uint(src[si+0]) << 16
-	if remain == 2 {
-		val |= uint(src[si+1]) << 8
-	}
-
-	dst[di+0] = enc.encode[val>>18&0x3F]
-	dst[di+1] = enc.encode[val>>12&0x3F]
-
-	switch remain {
-	case 2:
-		dst[di+2] = enc.encode[val>>6&0x3F]
-		if enc.padChar != NoPadding {
-			dst[di+3] = byte(enc.padChar)
-		}
-	case 1:
-		if enc.padChar != NoPadding {
-			dst[di+2] = byte(enc.padChar)
-			dst[di+3] = byte(enc.padChar)
-		}
-	}
-}
-```
-
-1. LCM(6, 8) = 24, 24 / 6 = 4, 24 / 8 = 3
-2. 主要流程都是把3个byte转为4个base64组成的字符，多出的字符再进行转换，最后判断是否需要填充
-
-## EncodeToString
 ```go
 func (enc *Encoding) EncodeToString(src []byte) string {
 	buf := make([]byte, enc.EncodedLen(len(src)))
@@ -122,7 +67,26 @@ func (enc *Encoding) EncodeToString(src []byte) string {
 }
 ```
 
-## AppendEncode
+帮你分配好内存+编码后返回字符串
+缺点：底层每次都会 make 申请一块新的内存来存放生成的字符串，如果高并发且数据量大，会给 GC（垃圾回收）带来压力。
+
+### DecodeString
+
+```go
+func (enc *Encoding) DecodeString(s string) ([]byte, error) {
+	dbuf := make([]byte, enc.DecodedLen(len(s)))
+	n, err := enc.Decode(dbuf, []byte(s))
+	return dbuf[:n], err
+}
+```
+
+同样是自动分配好结果切片的内存，解码后返回
+
+### Encode/Decode
+
+绝对不帮分配内存，一切控制权和责任都交给调用者
+
+### AppendEncode/AppendDecode
 
 ```go
 func (enc *Encoding) AppendEncode(dst, src []byte) []byte {
@@ -131,7 +95,22 @@ func (enc *Encoding) AppendEncode(dst, src []byte) []byte {
 	enc.Encode(dst[len(dst):][:n], src)
 	return dst[:len(dst)+n]
 }
+
+func (enc *Encoding) AppendDecode(dst, src []byte) ([]byte, error) {
+	// Compute the output size without padding to avoid over allocating.
+	n := len(src)
+	for n > 0 && rune(src[n-1]) == enc.padChar {
+		n--
+	}
+	n = decodedLen(n, NoPadding)
+
+	dst = slices.Grow(dst, n)
+	n, err := enc.Decode(dst[len(dst):][:n], src)
+	return dst[:len(dst)+n], err
+}
 ```
+
+作用：把编码/解码后的结果追加到 dst 后面，同样自带动态扩容和安全保障
 
 ## NewEncoder
 
