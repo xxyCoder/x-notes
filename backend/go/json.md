@@ -27,7 +27,7 @@ type Buffer struct {
 }
 ```
 
-1. 有个匿名嵌套字段，存储最终 JSON 字节流的物理容器
+1. 有个匿名嵌套字段，存储最终 JSON 字节流的物理容器，最开始为零值，后续使用可扩容并保持容量
 2. `ptrSeen` 用来模拟 set 数据结构，其中 key 存储的是内存指针，避免循环应用导致死循环
 3. `ptrLevel` 是为了减少 map 中对 key 执行的hash、位置计算的操作，如果 ptrLevel 超过 `startDetectingCyclesAfter`后才会用`ptrSeen`判断是否有死循环
 4. encodeState 本质就是 `Marshal` 每次独立工作的上下文
