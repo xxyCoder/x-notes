@@ -1,3 +1,176 @@
+## 总模型：error 是一棵可以被遍历的树
+
+Go 的 `error` 表面上只是一个接口：
+
+```go
+type error interface {
+	Error() string
+}
+```
+
+但是 `errors.Is`、`errors.As`、`errors.AsType` 真正依赖的不是字符串，而是错误对象额外实现的这些方法：
+
+```go
+Error() string          // 给人看的错误文本
+Unwrap() error          // 单链包装：一个错误包住另一个错误
+Unwrap() []error        // 多分支包装：一个错误包含多个子错误
+Is(target error) bool   // 自定义“我是否算作 target”
+As(target any) bool     // 自定义“我是否能转成 target 类型”
+```
+
+所以要把 error 记成一棵树：
+
+```text
+普通错误
+  没有 Unwrap
+
+fmt.Errorf("... %w ...", err)
+  一个 %w
+  -> *fmt.wrapError
+  -> Unwrap() error
+  -> 单链
+
+fmt.Errorf("... %w ... %w ...", err1, err2)
+  多个 %w，Go 1.20+
+  -> *fmt.wrapErrors
+  -> Unwrap() []error
+  -> 多叉树
+
+errors.Join(err1, err2)
+  -> *errors.joinError
+  -> Unwrap() []error
+  -> 多叉树
+```
+
+记忆口诀：
+
+```text
+New 造错，%w 包错，多个 %w / Join 并错；
+Is 查身份，As / AsType 查类型；
+Is / As 会遍历错误树，Unwrap 只拆单链。
+```
+
+## fmt.Errorf("%w")：wrapError 与 wrapErrors
+
+`fmt.Errorf` 遇到 `%w` 时，不只是拼字符串，而是返回带 `Unwrap` 能力的错误对象。
+
+核心分支可以理解为：
+
+```go
+switch len(p.wrappedErrs) {
+case 0:
+	err = errors.New(s)
+case 1:
+	err = &wrapError{msg: s, err: p.wrappedErrs[0]}
+default:
+	err = &wrapErrors{msg: s, errs: p.wrappedErrs}
+}
+```
+
+### 一个 %w：单链
+
+```go
+type wrapError struct {
+	msg string
+	err error
+}
+
+func (e *wrapError) Error() string {
+	return e.msg
+}
+
+func (e *wrapError) Unwrap() error {
+	return e.err
+}
+```
+
+例子：
+
+```go
+err := fmt.Errorf("query user: %w", ErrNotFound)
+```
+
+内部形状：
+
+```text
+*fmt.wrapError("query user: not found")
+  |
+  +-- Unwrap() error
+      |
+      +-- ErrNotFound
+```
+
+所以：
+
+```go
+errors.Is(err, ErrNotFound) // true
+```
+
+如果写成 `%v`，就只剩字符串，底层错误身份会丢失：
+
+```go
+fmt.Errorf("query user: %v", ErrNotFound) // 没有 Unwrap
+```
+
+### 多个 %w：多叉树
+
+Go 1.20+ 支持多个 `%w`：
+
+```go
+err := fmt.Errorf("save failed: db=%w cache=%w", dbErr, cacheErr)
+```
+
+内部不是链：
+
+```text
+err -> dbErr -> cacheErr
+```
+
+而是树：
+
+```text
+*fmt.wrapErrors("save failed: db=... cache=...")
+  |
+  +-- Unwrap() []error
+      |
+      +-- dbErr
+      +-- cacheErr
+```
+
+对应类型：
+
+```go
+type wrapErrors struct {
+	msg  string
+	errs []error
+}
+
+func (e *wrapErrors) Error() string {
+	return e.msg
+}
+
+func (e *wrapErrors) Unwrap() []error {
+	return e.errs
+}
+```
+
+所以：
+
+```go
+errors.Is(err, dbErr)    // true
+errors.Is(err, cacheErr) // true
+```
+
+多个 `%w` 和 `errors.Join` 都会生成 `Unwrap() []error`，区别主要是：
+
+```text
+多个 %w：
+  Error() 字符串完全由 fmt.Errorf 的格式化结果决定，适合写一条上下文明确的错误消息。
+
+errors.Join：
+  Error() 字符串通常是多个错误用换行拼起来，适合把多个独立错误合并返回。
+```
+
 ## As
 
 核心作用是从一个错误树中，找到第一个匹配特定类型的错误，并将其提取出来赋值给目标变量
@@ -166,19 +339,152 @@ func asType[E error](err error, ppe **E) (_ E, _ bool) {
 
 ## Is
 
-底层思想和`As`方法一致，只不过`As`用的是`AssignableTo`，而`Is`用的是`Comparable`
+核心作用是从错误树中判断是否存在某个目标错误。它和 `As` 的遍历方式一致，都会识别：
 
-在 Go 的底层实现中，任何接口（比如 error）在内存里其实是一个包含两个指针的结构体（无方法的叫 eface，有方法的叫 iface）：
+```go
+Unwrap() error
+Unwrap() []error
+```
 
-_type 指针：指向这个变量的动态类型信息（比如“我是一个 *fs.PathError”）。
+区别是：
 
-data 指针：指向这个变量具体的底层数据内存地址（比如“我的路径字段是 /tmp/a.txt”）。
+```text
+As / AsType：查类型，找到后把错误对象取出来
+Is：查身份，判断错误树里是否存在 target
+```
 
-errors.Is 的底层逻辑 (==)：它要求两个接口的 _type 必须相同，且 data 指针指向的值也必须相同（除非你重写了自定义的 Is 方法）。它是一个极其严格的“完全匹配”。
+源码流程可以理解为：
 
-errors.As 的底层逻辑 (AssignableTo / 类型断言)：它只看 _type 指针！只要类型元数据匹配，它根本不在乎底层的 data 是什么，直接把数据所在的内存地址拿过来，赋值给你的目标变量。
+```go
+func Is(err, target error) bool {
+	if err == nil || target == nil {
+		return err == target
+	}
+
+	isComparable := reflectlite.TypeOf(target).Comparable()
+	return is(err, target, isComparable)
+}
+
+func is(err, target error, targetComparable bool) bool {
+	for {
+		// 规则 1：如果 target 的动态类型可比较，就直接用 == 判断。
+		// 这一步用于匹配 sentinel error，例如 io.EOF、fs.ErrNotExist、自定义的 ErrNotFound。
+		if targetComparable && err == target {
+			return true
+		}
+
+		// 规则 2：允许当前错误自己声明“我是否算作 target”。
+		if x, ok := err.(interface{ Is(error) bool }); ok && x.Is(target) {
+			return true
+		}
+
+		// 规则 3：没有匹配时，继续拆包。
+		switch x := err.(type) {
+		case interface{ Unwrap() error }:
+			err = x.Unwrap()
+			if err == nil {
+				return false
+			}
+
+		case interface{ Unwrap() []error }:
+			for _, err := range x.Unwrap() {
+				if is(err, target, targetComparable) {
+					return true
+				}
+			}
+			return false
+
+		default:
+			return false
+		}
+	}
+}
+```
+
+遍历顺序：
+
+```text
+1. 当前 err == target 吗？
+2. 当前 err 自己实现了 Is(target) 吗？
+3. 有 Unwrap() error 吗？有就沿单链往下走
+4. 有 Unwrap() []error 吗？有就深度优先遍历每个子错误
+5. 都没有，返回 false
+```
+
+### Is 的“身份匹配”
+
+在 Go 的底层实现中，接口值可以粗略理解成两个部分：
+
+```text
+类型信息：这个接口里装的动态类型是什么
+数据信息：这个动态值具体是什么
+```
+
+`errors.Is` 里的 `err == target` 是严格匹配：动态类型要匹配，具体值也要匹配。对常见 sentinel error 来说，通常就是同一个错误变量：
+
+```go
+var ErrNotFound = errors.New("not found")
+
+err := fmt.Errorf("repo: %w", ErrNotFound)
+
+errors.Is(err, ErrNotFound)           // true
+errors.Is(err, errors.New("not found")) // false，不是同一个错误值
+```
+
+所以 sentinel error 必须定义成包级变量并复用，不要每次临时 `errors.New("not found")`。
+
+### 自定义 Is
+
+如果一个错误没有真的包住 `target`，但想让 `errors.Is` 认为它等价于某个错误，可以实现 `Is(error) bool`：
+
+```go
+type PermissionError struct{}
+
+func (PermissionError) Error() string {
+	return "permission denied"
+}
+
+func (PermissionError) Is(target error) bool {
+	return target == fs.ErrPermission
+}
+
+errors.Is(PermissionError{}, fs.ErrPermission) // true
+```
+
+这时命中的是自定义 `Is`，不是 `Unwrap`。
+
+### Is 和 As 的底层差异
+
+```text
+Is：
+  主要用 == 判断“是不是同一个错误值”
+  target 必须可比较时才直接比较
+  适合判断 sentinel error
+
+As / AsType：
+  判断当前错误能不能赋值给目标类型
+  适合提取结构化错误，例如 *fs.PathError、*os.SyscallError
+```
+
+一句话：
+
+```text
+Is 看身份，As 看类型。
+```
 
 ## joinError
+
+`errors.Join` 用来把多个独立错误合并成一个错误。它和多个 `%w` 一样，都会产生 `Unwrap() []error`，因此都会让错误结构变成多叉树。
+
+典型使用场景：一个函数执行了多个清理动作，希望把所有失败都返回，而不是只保留最后一个错误。
+
+```go
+func closeAll(a, b io.Closer) error {
+	return errors.Join(a.Close(), b.Close())
+}
+```
+
+源码核心：
 
 ```go
 func Join(errs ...error) error {
@@ -227,6 +533,16 @@ func (e *joinError) Unwrap() []error {
 }
 ```
 
+需要注意：
+
+```text
+1. Join 会过滤 nil。
+2. 如果所有参数都是 nil，Join 返回 nil。
+3. joinError.Error() 会把多个错误字符串用换行拼起来。
+4. joinError.Unwrap() 返回 []error，所以 errors.Is / errors.As 会遍历每个子错误。
+5. errors.Unwrap 不会拆 joinError，因为 errors.Unwrap 只认 Unwrap() error。
+```
+
 ## New
 
 创建一个新error，实际就是保存了传进来的文本，调用`Error`方法时将其返回
@@ -248,7 +564,9 @@ func (e *errorString) Error() string {
 
 ## Unwrap
 
-如果错误实现了`Unwrap`则调用，否则返回nil
+如果错误实现了 `Unwrap() error` 则调用，否则返回 nil。
+
+注意：`errors.Unwrap` 只认单链包装，不认 `Unwrap() []error`。也就是说，它可以拆一个 `%w` 产生的 `*fmt.wrapError`，但不能直接拆 `errors.Join` 或多个 `%w` 产生的多分支错误。
 
 ```go
 func Unwrap(err error) error {
@@ -260,4 +578,25 @@ func Unwrap(err error) error {
 	}
 	return u.Unwrap()
 }
+```
+
+对比：
+
+```go
+single := fmt.Errorf("outer: %w", io.EOF)
+errors.Unwrap(single) // io.EOF
+
+multi := errors.Join(io.EOF, fs.ErrNotExist)
+errors.Unwrap(multi) // nil
+
+multi2 := fmt.Errorf("a=%w b=%w", io.EOF, fs.ErrNotExist)
+errors.Unwrap(multi2) // nil
+```
+
+但是 `errors.Is`、`errors.As`、`errors.AsType` 会识别 `Unwrap() []error`：
+
+```go
+errors.Is(multi, io.EOF)       // true
+errors.Is(multi2, io.EOF)      // true
+errors.Is(multi2, fs.ErrNotExist) // true
 ```
