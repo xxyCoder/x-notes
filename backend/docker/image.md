@@ -631,3 +631,220 @@ docker history 看的是镜像 config 里的 history 元数据，不是原始 Do
 <missing> 不是 layer 缺失，而是没有可显示的中间镜像 config ID。
 layer 复用靠 digest，Docker 根据 manifest 检查本地是否已有对应 layer。
 ```
+
+## 14. docker rmi：删除镜像
+
+`docker rmi` 删除的是本地镜像引用和镜像内容，不会删除远端 registry 里的镜像。
+
+```bash
+docker rmi nginx:1.25
+docker rmi IMAGE_ID
+```
+
+镜像名和镜像 ID 的关系：
+
+```text
+repo:tag / repo@digest 只是引用
+IMAGE ID 才是本地镜像对象
+多个 repo:tag 可以指向同一个 IMAGE ID
+```
+
+区别：
+
+```text
+docker rmi repo:tag
+= 删除指定 tag 引用；如果它是最后一个引用，才继续删除镜像对象和独占 layer。
+
+docker rmi IMAGE_ID
+= 尝试删除这个镜像对象；如果多个 tag 指向它，通常会报 conflict。
+
+docker rmi -f IMAGE_ID
+= 强制删除该 IMAGE ID 下的所有 tag 引用，再尝试删除镜像对象。
+```
+
+输出含义：
+
+```text
+Untagged: xxx
+表示删除了 repo:tag 或 repo@digest 引用。
+
+Deleted: sha256:xxx
+表示删除了本地镜像对象、config 或独占 layer。
+```
+
+一个镜像删除时出现多个 `Deleted` 很正常，例如 Alpine 可能删掉：
+
+```text
+image config
+rootfs layer
+```
+
+如果某个 layer 被其他镜像共享，不会被删除。
+
+## 15. docker rmi 常用 options
+
+强制删除：
+
+```bash
+docker rmi -f IMAGE
+```
+
+生产上慎用，尤其是 `-f IMAGE_ID`，因为它可能移除多个 tag。
+
+不清理 dangling 父镜像：
+
+```bash
+docker rmi --no-prune IMAGE
+```
+
+默认删除目标镜像时，Docker 可能顺手清理已经没有引用的父镜像/中间镜像。`--no-prune` 表示只删目标镜像，不顺手清理这些无名父镜像。
+
+这个选项主要用于保留构建缓存或调试中间层，日常清理很少用。
+
+删除多平台镜像中的指定平台变体：
+
+```bash
+docker image rm --platform linux/amd64 --force IMAGE
+```
+
+多架构构建机上可能会用到。
+
+## 16. docker image prune：批量清理镜像
+
+`docker rmi` 是精确删除，`docker image prune` 是按规则批量清理。
+
+默认只清 dangling images：
+
+```bash
+docker image prune
+```
+
+dangling image 通常长这样：
+
+```text
+<none>  <none>  IMAGE_ID
+```
+
+常见来源是反复构建同一个 tag：
+
+```bash
+docker build -t myapp:latest .
+```
+
+旧的 `myapp:latest` 失去 tag 后，就可能变成 `<none>:<none>`。
+
+清理所有未被容器引用的镜像：
+
+```bash
+docker image prune -a
+```
+
+区别：
+
+```text
+dangling image
+= 没有 repo:tag 的镜像。
+
+unused image
+= 没有任何容器引用的镜像，即使它还有 repo:tag。
+```
+
+所以：
+
+```text
+docker image prune
+= 删除 dangling images，较保守。
+
+docker image prune -a
+= 删除所有 unused images，可能删掉有 tag 的旧版本，生产慎用。
+```
+
+生产更常用加时间过滤：
+
+```bash
+docker image prune -a --filter "until=168h"
+```
+
+表示删除 7 天前创建、且没有容器引用的镜像。
+
+## 17. docker rm：删除容器
+
+`docker rm` 删除的是容器，不是镜像。
+
+```bash
+docker rm CONTAINER
+```
+
+会删除：
+
+```text
+容器元数据
+容器可写层
+容器状态
+容器日志
+```
+
+不会删除：
+
+```text
+镜像
+named volume
+bind mount 里的宿主机文件
+远端 registry 镜像
+```
+
+运行中的容器默认删不掉：
+
+```bash
+docker stop app
+docker rm app
+```
+
+强制删除运行容器：
+
+```bash
+docker rm -f app
+```
+
+`-f` 适合卡死或无状态容器，不适合数据库、队列、正在处理任务的 worker。
+
+删除容器并删除匿名 volume：
+
+```bash
+docker rm -v app
+```
+
+注意：
+
+```text
+docker rm app
+= 默认不删除 volume。
+
+docker rm -v app
+= 会删除匿名 volume。
+```
+
+如果数据在匿名 volume 里，`rm -v` 可能把数据一起删掉。生产数据库类容器慎用。
+
+批量删除停止容器：
+
+```bash
+docker container prune
+```
+
+一次性容器可以运行时自动删除：
+
+```bash
+docker run --rm alpine echo hello
+```
+
+总结：
+
+```text
+docker rm  删除 container
+docker rmi 删除 image
+
+删镜像提示被容器占用时：
+先 docker rm 容器
+再 docker rmi 镜像
+```
