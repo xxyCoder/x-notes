@@ -141,6 +141,8 @@ go work use <模块目录...>
 go work sync
 ```
 
+这里的 `<模块目录>` 指的是包含 `go.mod` 的目录，不是普通包目录。
+
 例子：
 
 ```text
@@ -174,6 +176,151 @@ use (
 go work use ./common
 ```
 
+不能把普通包目录直接当成 work module：
+
+```text
+project/
+  sdk/
+    go.mod
+    internal/
+      httpx/
+        http.go
+```
+
+可以：
+
+```bash
+go work use ./sdk
+```
+
+一般不可以：
+
+```bash
+go work use ./sdk/internal/httpx
+```
+
+因为 `./sdk/internal/httpx` 通常只是包目录，里面没有 `go.mod`。
+
+`go work` 的本地替换逻辑：
+
+```text
+go work use ./sdk
+```
+
+Go 会读取：
+
+```text
+./sdk/go.mod
+```
+
+假设里面写的是：
+
+```go
+module example.com/sdk
+```
+
+那么 workspace 中如果有其他模块依赖：
+
+```go
+require example.com/sdk v0.1.0
+```
+
+Go 会优先使用本地：
+
+```text
+./sdk
+```
+
+也就是说，匹配依据不是目录名 `sdk`，而是 `sdk/go.mod` 里的模块名：
+
+```go
+module example.com/sdk
+```
+
+这点和 `replace` 很像。
+
+`replace` 写在 `go.mod`：
+
+```go
+replace example.com/sdk => ../sdk
+```
+
+`go work` 写在 `go.work`：
+
+```go
+use ./sdk
+```
+
+简单区别：
+
+```text
+replace  针对某个模块的 go.mod 生效
+go work  针对整个 workspace 生效
+```
+
+### go work sync
+
+`go work sync` 用来把 workspace 中最终选中的依赖版本，同步回各个模块自己的 `go.mod`。
+
+语法：
+
+```bash
+go work sync
+```
+
+例子：
+
+```text
+project/
+  go.work
+  app/
+    go.mod
+  sdk/
+    go.mod
+```
+
+假设：
+
+```go
+// app/go.mod
+require golang.org/x/net v0.20.0
+```
+
+```go
+// sdk/go.mod
+require golang.org/x/net v0.30.0
+```
+
+workspace 最终可能会选择较新的：
+
+```text
+golang.org/x/net v0.30.0
+```
+
+执行：
+
+```bash
+go work sync
+```
+
+之后它可能会把 `app/go.mod` 里的依赖版本也同步到：
+
+```go
+require golang.org/x/net v0.30.0
+```
+
+使用场景：
+
+- 多个本地模块一起开发时，想让各模块的 `go.mod` 版本和 workspace 保持一致。
+- 在 workspace 里升级了依赖。
+- 准备提交前，希望离开 workspace 后，各个模块单独构建也正常。
+
+不一定需要的场景：
+
+- 只是临时本地联调。
+- 没有改依赖版本。
+- 不准备提交各模块的 `go.mod` 变化。
+
 使用场景：
 
 - 一个项目里有多个 Go module。
@@ -198,15 +345,6 @@ go test <包路径>
 ```
 
 常用例子：
-
-```bash
-go test .
-go test ./...
-go test -v ./...
-go test -run TestAdd ./...
-go test -count=1 ./...
-go test -race ./...
-```
 
 含义：
 
@@ -310,6 +448,7 @@ go test ./...
 ```bash
 go build <包路径>
 go build -o <输出文件> <包路径>
+go build <文件列表>
 ```
 
 例子：
@@ -318,6 +457,7 @@ go build -o <输出文件> <包路径>
 go build .
 go build ./...
 go build -o app .
+go build main.go
 ```
 
 如果当前目录是 `main` 包：
@@ -345,6 +485,210 @@ go build -o server ./cmd/server
 ```
 
 意思是：把 `./cmd/server` 这个 main 包编译成 `server` 可执行文件。
+
+### go build 的编译单位
+
+Go 平时主要是按“包”编译，不是按“单个文件”编译。
+
+```bash
+go build .
+```
+
+意思是：
+
+```text
+编译当前目录这个包
+```
+
+如果当前目录有多个文件：
+
+```text
+myapp/
+  main.go
+  config.go
+  server.go
+```
+
+并且它们都是：
+
+```go
+package main
+```
+
+执行：
+
+```bash
+go build .
+```
+
+Go 会把当前目录下同一个 package 的 `.go` 文件一起编译，不是只编译 `main.go`。
+
+### 程序入口是什么
+
+Go 程序入口不是 `main.go` 文件，而是：
+
+```go
+package main
+
+func main() {
+}
+```
+
+也就是说，可执行程序需要满足两个条件：
+
+```text
+包名是 package main
+里面有 func main()
+```
+
+文件名不一定非得叫 `main.go`。
+
+比如只有一个 `app.go` 也可以：
+
+```go
+package main
+
+func main() {
+    println("hello")
+}
+```
+
+普通库包不需要入口：
+
+```go
+package user
+
+func GetUser() {}
+```
+
+执行：
+
+```bash
+go build ./pkg/user
+```
+
+可以编译检查这个库包，但不会生成可执行程序。
+
+### go build . 和 go build ./...
+
+假设项目结构是：
+
+```text
+myapp/
+  main.go
+  internal/
+    user/
+      user.go
+    order/
+      order.go
+```
+
+执行：
+
+```bash
+go build .
+```
+
+表示只构建根目录这个包。如果 `main.go` import 了 `internal/user`，那么 `internal/user` 也会作为依赖被编译进去。
+
+但是，如果 `internal/order` 没有被根目录的 main 包 import：
+
+```bash
+go build .
+```
+
+不会主动检查 `internal/order`。
+
+执行：
+
+```bash
+go build ./...
+```
+
+表示构建当前目录以及所有子目录里的包，所以它会检查：
+
+```text
+myapp
+myapp/internal/user
+myapp/internal/order
+```
+
+使用场景：
+
+```bash
+go build .      # 构建当前目录这个程序或包
+go build ./...  # 全项目编译检查
+```
+
+如果根目录有 `main.go`，平时只想构建当前程序：
+
+```bash
+go build .
+```
+
+发布时通常写得更明确：
+
+```bash
+go build -o app .
+```
+
+提交前或 CI 里想检查整个项目：
+
+```bash
+go build ./...
+```
+
+### go build main.go
+
+`go build` 也可以跟文件列表：
+
+```bash
+go build main.go
+```
+
+但这种不适合日常项目开发。
+
+比如：
+
+```text
+myapp/
+  main.go
+  config.go
+```
+
+如果 `main.go` 里调用了 `config.go` 里的 `LoadConfig()`，只执行：
+
+```bash
+go build main.go
+```
+
+可能会报：
+
+```text
+undefined: LoadConfig
+```
+
+因为你只指定了 `main.go`，没有把 `config.go` 放进这次构建的文件列表。
+
+要么写：
+
+```bash
+go build main.go config.go
+```
+
+要么更推荐：
+
+```bash
+go build .
+```
+
+总结：
+
+```text
+go build .        编译当前目录这个包
+go build ./...    编译当前目录及子目录所有包
+go build main.go  编译指定文件列表，不推荐日常项目使用
+```
 
 ## gofmt
 
