@@ -586,6 +586,437 @@ docker run --rm -it --entrypoint bash ubuntu
 
 ---
 
+## docker exec：在运行中的容器里启动新进程
+
+作用：在一个已经运行的容器里，再执行一条新的命令。
+
+基本格式：
+
+```bash
+docker exec [OPTIONS] CONTAINER COMMAND [ARG...]
+```
+
+常见用法：
+
+```bash
+docker exec nginx ls /usr/share/nginx/html
+docker exec -it nginx sh
+docker exec -it nginx bash
+```
+
+注意：
+
+- `docker exec` 要求目标容器正在运行。
+- `docker exec` 不会创建新容器。
+- `docker exec` 不会替换容器原来的主进程。
+- 如果容器主进程退出，容器停止，就不能再 `exec` 进去。
+
+例如，一个容器里原本只有主进程：
+
+```text
+PID 1: nginx
+```
+
+执行：
+
+```bash
+docker exec -it nginx sh
+```
+
+之后可以理解为容器里多了一个新进程：
+
+```text
+PID 1: nginx
+PID 23: sh
+```
+
+这个 `sh` 是新启动的进程，不是把 `nginx` 替换掉。
+
+### docker exec 的原理
+
+容器不是一个小虚拟机。容器里的程序，本质上还是宿主机上的普通进程，只是被放进了隔离环境里。
+
+这个隔离环境主要包括：
+
+```text
+namespace  隔离进程、网络、挂载点、hostname 等视图
+cgroup     限制 CPU、内存等资源
+rootfs     容器看到的根文件系统
+```
+
+执行：
+
+```bash
+docker exec -it nginx sh
+```
+
+大致过程是：
+
+```text
+Docker CLI
+  -> 把 exec 请求发给 dockerd
+  -> dockerd/containerd 找到目标容器
+  -> 在目标容器已有的 namespace、cgroup、rootfs 中启动新进程
+  -> 执行 sh
+```
+
+所以，`docker exec` 的本质是：
+
+```text
+在目标容器已有的隔离环境里，启动一个新的宿主机进程。
+```
+
+这个新进程和容器原来的主进程共享同一套容器环境：
+
+- 看到同一个容器文件系统。
+- 处在同一个网络 namespace 里。
+- 受到同一组 cgroup 资源限制。
+- 在容器内部看到的是容器自己的进程视图。
+
+### fd 0、1、2 怎么连接
+
+执行交互式命令时：
+
+```bash
+docker exec -it nginx sh
+```
+
+可以粗略理解为：
+
+```text
+你的终端
+  fd 0 / fd 1 / fd 2
+    |
+Docker CLI
+    |
+dockerd / containerd
+    |
+pipe 或 pty
+    |
+容器里的 exec 新进程
+  fd 0 / fd 1 / fd 2
+```
+
+更准确地说，不是把宿主机终端的 `fd 0`、`fd 1`、`fd 2` 直接塞给容器进程，而是 Docker 在中间做了一层转接。
+
+如果不使用 `-t`：
+
+```bash
+docker exec -i nginx cat
+```
+
+通常更像是通过 pipe 连接：
+
+```text
+你的 stdin  -> pipe -> 容器进程 fd 0
+你的 stdout <- pipe <- 容器进程 fd 1
+你的 stderr <- pipe <- 容器进程 fd 2
+```
+
+如果使用 `-t`：
+
+```bash
+docker exec -it nginx sh
+```
+
+Docker 会分配一个伪终端，也就是 pseudo-TTY：
+
+```text
+你的终端
+  -> Docker CLI
+  -> pty master
+  -> pty slave
+  -> 容器进程 fd 0 / fd 1 / fd 2
+```
+
+这时容器里的 shell 会认为自己运行在终端里，所以会启用：
+
+- 提示符。
+- 行编辑。
+- 颜色输出。
+- 交互式行为。
+
+这就是为什么下面两个命令体验不一样：
+
+```bash
+docker exec nginx sh
+docker exec -it nginx sh
+```
+
+前者没有交互式终端体验，后者才像真正进入了 shell。
+
+### -i 和 -t 的区别
+
+`-i` 表示保持标准输入打开：
+
+```text
+-i = keep STDIN open
+```
+
+`-t` 表示分配伪终端：
+
+```text
+-t = allocate a pseudo-TTY
+```
+
+常见组合：
+
+```bash
+docker exec -it 容器名 sh
+docker exec -it 容器名 bash
+```
+
+注意：用了 `-t` 后，标准输出和标准错误通常会合并到同一个 tty 流里；不用 `-t` 时，Docker 可以分别处理 stdout 和 stderr。
+
+### docker exec 和 docker run 的区别
+
+`docker run` 是创建并启动一个新容器：
+
+```bash
+docker run ubuntu echo hello
+```
+
+`docker exec` 是在已有的、正在运行的容器里启动新进程：
+
+```bash
+docker exec nginx echo hello
+```
+
+对比：
+
+```text
+docker run   = 新建容器 + 启动容器里的进程
+docker exec  = 在已有容器里启动一个新进程
+```
+
+### docker exec 和 docker attach 的区别
+
+`docker exec` 会创建新进程：
+
+```bash
+docker exec -it nginx sh
+```
+
+可以理解为：
+
+```text
+容器原来的主进程还在运行
+Docker 额外启动了一个 sh
+```
+
+`docker attach` 不会创建新进程：
+
+```bash
+docker attach nginx
+```
+
+它只是把当前终端接到容器主进程原本的输入输出上。
+
+对比：
+
+```text
+docker exec    新开进程
+docker attach  连接主进程的 fd 0、fd 1、fd 2
+```
+
+### shell 展开的坑
+
+这个命令里的 `$HOME` 可能会先被宿主机 shell 展开：
+
+```bash
+docker exec nginx echo $HOME
+```
+
+如果想让 `$HOME` 在容器里展开，要让容器里的 shell 来解释：
+
+```bash
+docker exec nginx sh -c 'echo $HOME'
+```
+
+总结：
+
+- `docker exec` 是在运行中的容器里启动新进程。
+- 新进程会进入目标容器已有的 namespace、cgroup、rootfs。
+- `exec` 不会替换容器主进程。
+- `-i` 保持标准输入打开。
+- `-t` 分配伪终端。
+- `-it` 常用于进入容器调试。
+- 交互式 `exec` 会把新进程的 `fd 0`、`fd 1`、`fd 2` 通过 pipe 或 pty 转接到当前终端。
+
+---
+
+## docker attach：连接到容器主进程
+
+作用：把当前终端连接到一个正在运行的容器主进程上。
+
+基本格式：
+
+```bash
+docker attach 容器名
+docker attach 容器ID
+```
+
+注意：`attach` 不是进入容器，也不是新开一个 shell。
+
+它连接的是容器启动时那个主程序的输入和输出。
+
+可以先这样理解：
+
+```text
+docker attach = 把当前终端接到容器主程序的 fd 0、fd 1、fd 2
+```
+
+其中：
+
+```text
+fd 0 = 标准输入 stdin
+fd 1 = 标准输出 stdout
+fd 2 = 标准错误 stderr
+```
+
+也就是：
+
+```text
+你的键盘
+  -> docker attach
+  -> 容器主程序的 fd 0
+
+容器主程序的 fd 1
+  -> docker attach
+  -> 你的屏幕
+
+容器主程序的 fd 2
+  -> docker attach
+  -> 你的屏幕
+```
+
+例如：
+
+```bash
+docker run -di --name echoer busybox cat
+```
+
+这个容器的主程序是：
+
+```bash
+cat
+```
+
+`cat` 的特点是：输入什么，就输出什么。
+
+连接到它：
+
+```bash
+docker attach echoer
+```
+
+这时你输入：
+
+```text
+hello
+```
+
+容器里的 `cat` 会收到这段输入，然后输出：
+
+```text
+hello
+```
+
+整个过程可以理解为：
+
+```text
+你的输入 -> docker attach -> 容器里的 cat
+容器里的 cat 输出 -> docker attach -> 你的屏幕
+```
+
+再比如：
+
+```bash
+docker run -d --name demo busybox sh -c "while true; do echo hello; sleep 2; done"
+```
+
+这个容器的主程序会一直输出：
+
+```text
+hello
+hello
+hello
+```
+
+执行：
+
+```bash
+docker attach demo
+```
+
+你的终端就会接到这个主程序的输出上，于是能看到它继续打印。
+
+### 多个程序时 attach 连接谁
+
+一个容器里可以运行多个程序，但 `docker attach` 连接的仍然是容器的主进程。
+
+如果主进程又启动了其他程序，可以这样理解：
+
+```text
+容器主进程
+  - 程序 A
+  - 程序 B
+```
+
+`attach` 主要接的是容器主进程那条输入输出线。
+
+如果程序 A、程序 B 也把输出打印到这条线上，那么 `attach` 可能看到它们的输出混在一起：
+
+```text
+A: hello
+B: running
+A: hello
+B: running
+```
+
+但如果某个程序把日志写到文件里，例如：
+
+```text
+/app/app.log
+```
+
+那 `docker attach` 看不到它，因为它没有输出到容器主进程这条标准输出线上。
+
+输入也是类似的：
+
+```text
+你的键盘输入 -> 容器主进程的 fd 0
+```
+
+不是说容器里有多个程序，你输入一行内容，每个程序都能收到。
+
+### 退出 attach
+
+如果想退出 `attach`，但不停止容器，使用：
+
+```text
+Ctrl+P，然后 Ctrl+Q
+```
+
+如果直接按：
+
+```text
+Ctrl+C
+```
+
+可能会把停止信号发给容器主程序，导致容器退出。
+
+总结：
+
+- `docker attach` 连接的是容器主程序的 `fd 0`、`fd 1`、`fd 2`。
+- `fd 0` 接收你的键盘输入。
+- `fd 1` 和 `fd 2` 输出到你的屏幕。
+- `attach` 不会创建新程序。
+- `attach` 不等于进入容器。
+- 多个程序时，关键看它们有没有把输出接到这条标准输出线上。
+
+---
+
 ## 常见组合
 
 ### 临时进入 Ubuntu
@@ -666,3 +1097,6 @@ docker run --rm -it --entrypoint sh nginx
 - `--cpus`：常用参数是 `--cpus`，不是 `--cpu`。
 - `-u`：更安全，但容易遇到挂载目录权限问题。
 - `--entrypoint`：调试好用，部署时乱用可能跳过镜像初始化逻辑。
+- `docker exec`：在运行中的容器里新启动一个进程，不会替换主进程。
+- `docker exec -it`：通过伪终端进入容器调试，常用 `sh` 或 `bash`。
+- `docker attach`：连接的是容器主进程的标准输入输出，不会新开进程。
