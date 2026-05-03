@@ -1100,3 +1100,438 @@ docker run --rm -it --entrypoint sh nginx
 - `docker exec`：在运行中的容器里新启动一个进程，不会替换主进程。
 - `docker exec -it`：通过伪终端进入容器调试，常用 `sh` 或 `bash`。
 - `docker attach`：连接的是容器主进程的标准输入输出，不会新开进程。
+
+---
+
+## docker inspect：查看 Docker 对象详情
+
+基本格式：
+
+```bash
+docker inspect [OPTIONS] NAME|ID [NAME|ID...]
+```
+
+含义：
+
+- `docker inspect` 是通用查看命令。
+- `NAME|ID` 可以是容器名、容器 ID、镜像名、网络名、卷名等。
+- 后面可以跟多个对象，一次查看多个。
+- 默认输出完整 JSON。
+
+示例：
+
+```bash
+docker inspect nginx
+docker inspect nginx redis mysql
+docker inspect nginx:latest
+docker inspect bridge
+docker inspect my-volume
+```
+
+常用 options：
+
+```bash
+docker inspect --type container nginx
+docker inspect --type image nginx:latest
+docker inspect --type network bridge
+docker inspect -f '{{.State.Status}}' nginx
+docker inspect --size nginx
+```
+
+说明：
+
+- `--type`：指定对象类型，避免容器、镜像、网络、卷重名时产生歧义。
+- `-f, --format`：按 Go template 输出指定字段，排查时很常用。
+- `--size`：显示容器文件系统大小信息。
+
+### docker inspect 和 docker network inspect
+
+这些命令本质上都是 inspect，只是入口更具体：
+
+```bash
+docker inspect --type container nginx
+docker container inspect nginx
+
+docker inspect --type image nginx:latest
+docker image inspect nginx:latest
+
+docker inspect --type network bridge
+docker network inspect bridge
+
+docker inspect --type volume my-volume
+docker volume inspect my-volume
+```
+
+所以：
+
+```bash
+docker network inspect bridge
+```
+
+可以理解为：
+
+```bash
+docker inspect --type network bridge
+```
+
+### 容器 inspect 常看字段
+
+```text
+.Id
+.Name
+.Config
+.State
+.HostConfig
+.NetworkSettings
+.Mounts
+```
+
+查看容器状态：
+
+```bash
+docker inspect -f '{{.State.Status}}' nginx
+docker inspect -f '{{.State.ExitCode}}' nginx
+docker inspect -f '{{.State.OOMKilled}}' nginx
+docker inspect -f '{{.State.Error}}' nginx
+```
+
+字段含义：
+
+- `.State.Status`：容器状态，例如 `running`、`exited`。
+- `.State.ExitCode`：退出码。
+- `.State.OOMKilled`：是否因为内存不足被杀掉。
+- `.State.Error`：Docker 层面的启动错误。
+
+查看启动配置：
+
+```bash
+docker inspect -f '{{.Config.Image}}' nginx
+docker inspect -f '{{.Config.Entrypoint}}' nginx
+docker inspect -f '{{.Config.Cmd}}' nginx
+docker inspect -f '{{.Config.Env}}' nginx
+```
+
+查看主机侧配置：
+
+```bash
+docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' nginx
+docker inspect -f '{{.HostConfig.NetworkMode}}' nginx
+docker inspect -f '{{.HostConfig.Privileged}}' nginx
+```
+
+查看网络信息：
+
+```bash
+docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nginx
+docker inspect -f '{{json .NetworkSettings.Ports}}' nginx
+```
+
+查看挂载信息：
+
+```bash
+docker inspect -f '{{json .Mounts}}' nginx
+```
+
+如果装了 `jq`，看 JSON 会更舒服：
+
+```bash
+docker inspect nginx | jq '.[0].Mounts'
+docker inspect nginx | jq '.[0].NetworkSettings.Ports'
+```
+
+总结：
+
+```text
+docker inspect 看的是 Docker 对象的真实配置和状态。
+docker ps 看概况，docker logs 看输出，docker inspect 看细节。
+```
+
+---
+
+## docker top：查看容器进程
+
+基本格式：
+
+```bash
+docker top CONTAINER [ps OPTIONS]
+docker container top CONTAINER [ps OPTIONS]
+```
+
+`docker top` 用来查看某个正在运行的容器里的进程列表。
+
+注意：
+
+- `docker top` 不是交互式的 Linux `top`。
+- 它更像是对容器进程执行了一次 `ps`。
+- 官方语法是单个 `CONTAINER`，不是一次传多个容器。
+
+示例：
+
+```bash
+docker top nginx
+docker top nginx -ef
+docker top nginx aux
+docker top nginx -eo pid,ppid,user,stat,args
+```
+
+### ps OPTIONS 是什么意思
+
+`ps` 是 Linux/Unix 里查看进程的命令，可以理解为 `process status`。
+
+`docker top CONTAINER [ps OPTIONS]` 后面的 `[ps OPTIONS]` 不是 Docker 自己的参数，而是传给 `ps` 的显示参数。
+
+例如：
+
+```bash
+docker top nginx -ef
+```
+
+大致类似用 `ps -ef` 的格式查看容器进程。
+
+```bash
+docker top nginx aux
+```
+
+大致类似用 `ps aux` 的格式查看容器进程。
+
+常见字段：
+
+```text
+UID / USER    进程所属用户
+PID           进程 ID，通常是宿主机上的 PID
+PPID          父进程 ID
+STAT          进程状态
+TIME          CPU 时间
+CMD / ARGS    启动命令
+```
+
+常用排查：
+
+```bash
+docker top app
+docker top app -ef
+docker top app -eo pid,ppid,user,args
+docker top app -eo pid,ppid,stat,etime,args
+```
+
+总结：
+
+```text
+docker top 看容器里正在运行哪些进程。
+[ps OPTIONS] 控制进程列表的显示格式。
+```
+
+---
+
+## docker diff：查看容器可写层变化
+
+基本格式：
+
+```bash
+docker diff CONTAINER
+```
+
+`docker diff` 看的是：
+
+```text
+容器可写层 相对于 原始镜像文件系统 的变化
+```
+
+Dockerfile 构建出镜像，镜像是只读层；`docker run` 启动容器后，Docker 会在镜像上面加一层容器自己的可写层。
+
+结构可以理解为：
+
+```text
+Dockerfile
+   ↓ docker build
+Image 镜像只读层
+   ↓ docker run
+Container 可写层
+```
+
+`docker diff` 对比的是：
+
+```text
+镜像最终文件系统
+vs
+当前容器可写层
+```
+
+示例：
+
+```bash
+docker diff nginx
+```
+
+输出可能是：
+
+```text
+C /etc/nginx/nginx.conf
+A /tmp/a.txt
+D /usr/share/nginx/html/index.html
+```
+
+前面的字母含义：
+
+```text
+A    Added，新增文件或目录
+C    Changed，修改过的文件或目录
+D    Deleted，删除的文件或目录
+```
+
+也就是：
+
+- `A /tmp/a.txt`：镜像里原来没有，容器运行后新增了。
+- `C /etc/nginx/nginx.conf`：镜像里原来有，容器运行后被改了。
+- `D /app/old.txt`：镜像里原来有，容器运行后被删了。
+
+这些变化可能来自：
+
+- `docker exec` 进入容器后手动修改。
+- 应用程序运行时生成文件。
+- 启动脚本修改配置。
+- 包管理器安装软件。
+- 日志、缓存、临时文件产生。
+
+注意：
+
+- `docker diff` 不是对比 Dockerfile 文本。
+- `docker diff` 不是看镜像构建历史。
+- `docker diff` 不适合看 volume 里的数据变化。
+- 它主要看容器自己的可写层发生了哪些增、删、改。
+
+总结：
+
+```text
+docker diff 看 docker run 之后，这个容器文件系统相对镜像发生了什么变化。
+```
+
+---
+
+## docker logs：查看容器输出日志
+
+基本格式：
+
+```bash
+docker logs [OPTIONS] CONTAINER
+```
+
+`docker logs` 查看的是容器进程输出到：
+
+```text
+stdout    标准输出
+stderr    标准错误
+```
+
+的内容。
+
+示例：
+
+```bash
+docker logs nginx
+docker logs --tail 100 nginx
+docker logs -f nginx
+docker logs -f --tail 100 -t nginx
+docker logs --since 30m nginx
+```
+
+常用 options：
+
+```bash
+-f, --follow      实时跟踪日志
+--tail            只看最后 N 行
+-t, --timestamps  显示时间戳
+--since           查看某个时间之后的日志
+--until           查看某个时间之前的日志
+--details         显示额外日志属性
+```
+
+最常用组合：
+
+```bash
+docker logs -f --tail 100 app
+docker logs -f --tail 100 -t app
+docker logs --since 10m app
+```
+
+### 主进程和 docker logs 的关系
+
+`docker run` 最终启动的命令，就是容器里的主进程，通常是 PID 1。
+
+容器主进程来自：
+
+```text
+镜像 ENTRYPOINT + 镜像 CMD + docker run 后面的 COMMAND/ARG 覆盖或追加
+```
+
+例如：
+
+```bash
+docker run ubuntu sleep 100
+```
+
+这个容器的主进程就是：
+
+```bash
+sleep 100
+```
+
+只要主进程或它的子进程把内容写到 `stdout` / `stderr`，Docker 就能收集，`docker logs` 就能看到。
+
+例如：
+
+```bash
+docker run --name c1 busybox sh -c 'echo hello; echo error >&2'
+docker logs c1
+```
+
+能看到：
+
+```text
+hello
+error
+```
+
+### docker logs 看不到什么
+
+如果程序只把日志写进容器内部文件，例如：
+
+```text
+/app/app.log
+/var/log/nginx/access.log
+/var/log/nginx/error.log
+```
+
+但没有输出到 `stdout` / `stderr`，那么：
+
+```bash
+docker logs app
+```
+
+可能看不到这些文件日志。
+
+容器化应用更推荐：
+
+```text
+日志输出到 stdout / stderr
+Docker 负责收集日志
+```
+
+注意：
+
+- `docker logs` 看的是标准输出和标准错误，不是自动读取容器里所有日志文件。
+- `docker logs` 能否正常读取，也和容器的 logging driver 有关。
+- 默认常见 logging driver 是 `json-file`，一般可以直接用 `docker logs`。
+
+查看日志驱动：
+
+```bash
+docker inspect -f '{{.HostConfig.LogConfig.Type}}' app
+```
+
+总结：
+
+```text
+docker logs 看容器主进程和子进程输出到 stdout / stderr 的内容。
+它不是查看容器内所有日志文件的命令。
+```
