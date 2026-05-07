@@ -572,6 +572,338 @@ RUN apt-get update \
 
 这样安装和清理发生在同一个镜像层中，更利于控制镜像体积。
 
+### 5.2 RUN --mount：构建时临时挂载
+
+`RUN --mount` 是 BuildKit 提供的 Dockerfile 能力，用来在某一条 `RUN` 执行期间临时挂载文件、缓存、密钥或 SSH 认证通道。
+
+基本形式：
+
+```dockerfile
+RUN --mount=type=类型,字段=值 命令
+```
+
+核心区别：
+
+```text
+普通 RUN 写入路径：
+  路径背后是镜像层的可写层，RUN 结束后可能进入镜像。
+
+RUN --mount 写入 target：
+  target 路径背后是挂载来源，RUN 结束后挂载撤销，通常不进入镜像层。
+```
+
+`target` 永远表示：
+
+```text
+挂载到当前 RUN 构建容器里的哪个路径
+```
+
+程序会不会使用这个路径，取决于程序自己的默认规则或配置。例如 Go 默认使用 `/go/pkg/mod` 作为 module 缓存目录，所以把 cache 挂到 `/go/pkg/mod` 才有意义。
+
+#### 5.2.1 bind：临时读取构建上下文或其他阶段的文件
+
+例子：
+
+```dockerfile
+RUN --mount=type=bind,source=./scripts,target=/mnt/scripts,readonly \
+    /mnt/scripts/lint.sh
+```
+
+字段作用：
+
+```text
+type=bind
+  表示这是普通文件/目录的临时挂载。
+
+source=./scripts
+  指明挂载来源。默认来自构建上下文，也就是 docker build . 中的那个目录。
+
+target=/mnt/scripts
+  指明挂载到当前 RUN 容器里的哪个路径。
+
+readonly
+  只读挂载，命令可以读，不能改。
+```
+
+执行过程：
+
+```text
+构建上下文 ./scripts
+  -> 临时挂到 RUN 容器的 /mnt/scripts
+  -> 执行 /mnt/scripts/lint.sh
+  -> RUN 结束后挂载撤销
+```
+
+最终效果：
+
+```text
+命令能临时读取 ./scripts；
+但 ./scripts 不会因为这条 RUN 自动进入镜像层。
+```
+
+如果不用 `bind`，通常要：
+
+```dockerfile
+COPY ./scripts /mnt/scripts
+RUN /mnt/scripts/lint.sh
+```
+
+这会把 `scripts` 复制进镜像层。
+
+`bind` 也可以从其他构建阶段取文件：
+
+```dockerfile
+FROM golang:1.22 AS builder
+WORKDIR /src
+COPY . .
+RUN go build -o app .
+
+FROM alpine
+RUN --mount=type=bind,from=builder,source=/src/app,target=/tmp/app \
+    cp /tmp/app /usr/local/bin/app
+```
+
+这里：
+
+```text
+from=builder
+  来源是 builder 阶段。
+
+source=/src/app
+  取 builder 阶段里的 /src/app。
+
+target=/tmp/app
+  临时挂到当前阶段 RUN 容器里的 /tmp/app。
+```
+
+#### 5.2.2 cache：临时挂载 BuildKit 管理的缓存
+
+例子：
+
+```dockerfile
+RUN --mount=type=cache,id=gomod,target=/go/pkg/mod \
+    go mod download
+```
+
+字段作用：
+
+```text
+type=cache
+  表示这是一块 BuildKit 管理的缓存。
+
+id=gomod
+  缓存的名字。BuildKit 用它查找或创建缓存。
+
+target=/go/pkg/mod
+  把这块缓存挂到当前 RUN 容器里的 /go/pkg/mod。
+```
+
+执行过程：
+
+```text
+BuildKit 找到或创建 id=gomod 的缓存
+  -> 挂到 RUN 容器里的 /go/pkg/mod
+  -> go mod download 读写 /go/pkg/mod
+  -> 数据实际进入 BuildKit cache store
+  -> RUN 结束后挂载撤销
+  -> 缓存保留，下次构建可复用
+```
+
+最终效果：
+
+```text
+Go 依赖缓存可以复用；
+但 /go/pkg/mod 里的缓存不会进入镜像层。
+```
+
+如果不写 `--mount`：
+
+```dockerfile
+RUN go mod download
+```
+
+`/go/pkg/mod` 是普通目录，下载结果可能写入镜像层。
+
+常见字段：
+
+```text
+sharing=shared
+  默认值，多个构建可以同时使用。
+
+sharing=locked
+  加锁使用，同一时间只允许一个构建写。apt 这类缓存常用。
+
+sharing=private
+  并发构建时尽量使用独立缓存。
+
+readonly / ro
+  只读挂载缓存。
+
+uid / gid / mode
+  第一次创建缓存目录时设置属主、属组和权限。
+```
+
+#### 5.2.3 secret：临时传入密钥内容
+
+Dockerfile：
+
+```dockerfile
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+    npm ci
+```
+
+构建命令：
+
+```bash
+docker buildx build --secret id=npmrc,src=$HOME/.npmrc .
+```
+
+字段作用：
+
+```text
+type=secret
+  表示这是密钥挂载。
+
+id=npmrc
+  Dockerfile 中声明要使用名为 npmrc 的 secret。
+
+src=$HOME/.npmrc
+  构建命令中声明这个 secret 的内容来自主机上的哪个文件。
+
+target=/root/.npmrc
+  在 RUN 容器里把 secret 临时挂成 /root/.npmrc 文件。
+```
+
+执行过程：
+
+```text
+主机 $HOME/.npmrc
+  -> docker buildx build --secret 交给 BuildKit，名字是 npmrc
+  -> RUN 时挂到容器里的 /root/.npmrc
+  -> npm ci 读取 /root/.npmrc
+  -> RUN 结束后挂载撤销
+```
+
+最终效果：
+
+```text
+命令能临时读取密钥；
+密钥不会进入镜像层。
+```
+
+如果不用 `secret`，容易写成：
+
+```dockerfile
+COPY .npmrc /root/.npmrc
+RUN npm ci
+RUN rm /root/.npmrc
+```
+
+问题是 `.npmrc` 已经进入过镜像层，后面删除不等于历史层里没有。
+
+secret 也可以传成环境变量：
+
+```dockerfile
+RUN --mount=type=secret,id=API_TOKEN,env=API_TOKEN \
+    some-command
+```
+
+```bash
+docker buildx build --secret id=API_TOKEN,env=API_TOKEN .
+```
+
+这里：
+
+```text
+env=API_TOKEN
+  表示 secret 在 RUN 里以环境变量 API_TOKEN 出现。
+```
+
+常见字段：
+
+```text
+required=true
+  没传这个 secret 时直接构建失败。
+
+mode / uid / gid
+  设置 secret 文件在 RUN 容器里的权限和所属用户。
+```
+
+#### 5.2.4 ssh：临时传入 SSH agent 认证通道
+
+Dockerfile：
+
+```dockerfile
+RUN --mount=type=ssh \
+    git clone git@github.com:org/private-repo.git
+```
+
+构建命令：
+
+```bash
+docker buildx build --ssh default=$SSH_AUTH_SOCK .
+```
+
+字段作用：
+
+```text
+type=ssh
+  表示这条 RUN 需要 SSH 认证能力。
+
+id=default
+  SSH 配置的名字。未显式写 id 时默认是 default。
+
+$SSH_AUTH_SOCK
+  主机上 ssh-agent 的 socket 路径。
+
+target
+  SSH agent socket 在 RUN 容器里的路径。通常不用手写，BuildKit 会处理。
+```
+
+对应关系：
+
+```text
+Dockerfile:
+  --mount=type=ssh,id=default
+
+build 命令:
+  --ssh default=$SSH_AUTH_SOCK
+        ^       ^
+        |       主机 ssh-agent socket 路径
+        |
+        SSH 配置名字
+```
+
+执行过程：
+
+```text
+主机 ssh-agent 持有私钥
+  -> $SSH_AUTH_SOCK 是和 ssh-agent 通信的 socket
+  -> docker buildx build --ssh 把这个 socket 交给 BuildKit
+  -> RUN 时 BuildKit 把 socket 临时挂进容器
+  -> 容器里的 git/ssh 通过 socket 请求认证
+  -> ssh-agent 使用私钥完成签名
+  -> RUN 结束后 socket 挂载撤销
+```
+
+重点：
+
+```text
+ssh mount 传的是 ssh-agent socket，不是私钥文件。
+容器能请求 ssh-agent 认证，但拿不到私钥本身。
+```
+
+如果不用 `ssh`，容易写成：
+
+```dockerfile
+COPY id_rsa /root/.ssh/id_rsa
+RUN chmod 600 /root/.ssh/id_rsa \
+    && git clone git@github.com:org/private-repo.git \
+    && rm /root/.ssh/id_rsa
+```
+
+问题是私钥已经进入过镜像层，后面删除仍有泄露风险。
+
 ---
 
 ## 6. CMD：容器启动时的默认命令
