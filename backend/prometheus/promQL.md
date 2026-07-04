@@ -54,6 +54,25 @@ up{job="api", instance="B"} 0
 
 它查的是当前时刻每个实例的值。
 
+再看本地指标：
+
+```promql
+xxy_prome_api_request_total
+```
+
+如果当前有 5 条 `xxy_prome_api_request_total` 序列，拆开是：
+
+```text
+xxy_prome_api_request_total
+└── instant vector
+    └── 所有名字叫 xxy_prome_api_request_total 的时间序列
+        ├── 序列 1 => 当前查询时刻的一个值
+        ├── 序列 2 => 当前查询时刻的一个值
+        ├── 序列 3 => 当前查询时刻的一个值
+        ├── 序列 4 => 当前查询时刻的一个值
+        └── 序列 5 => 当前查询时刻的一个值
+```
+
 ---
 
 ### 2.2 Range Vector：区间向量
@@ -73,6 +92,96 @@ http_requests_total[5m]
 ```
 
 注意：range vector 不是把所有实例混在一起，而是每条时间序列各自取自己的 5 分钟窗口。
+
+再看本地指标：
+
+```promql
+xxy_prome_api_request_total[5m]
+```
+
+拆开是：
+
+```text
+xxy_prome_api_request_total[5m]
+└── range vector
+    ├── 时间范围
+    │   └── 最近 5 分钟
+    │
+    └── 所有名字叫 xxy_prome_api_request_total 的时间序列
+        ├── 序列 1
+        │   ├── xxy_prome_api_request_total{code="0",method="POST",path="/v1/chat/completion",status="0",type="request",version="1.0"}
+        │   └── 最近 5 分钟内的采样点
+        │       ├── t1 => v1
+        │       ├── t2 => v2
+        │       ├── t3 => v3
+        │       └── t4 => v4
+        ├── 序列 2
+        │   ├── xxy_prome_api_request_total{code="0",method="POST",path="/v1/chat/completion",status="200",type="success",version="1.0"}
+        │   └── 最近 5 分钟内的采样点
+        │       ├── t1 => v1
+        │       ├── t2 => v2
+        │       ├── t3 => v3
+        │       └── t4 => v4
+        ├── 序列 3
+        │   ├── xxy_prome_api_request_total{code="400001",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"}
+        │   └── 最近 5 分钟内的采样点
+        │       ├── t1 => v1
+        │       ├── t2 => v2
+        │       ├── t3 => v3
+        │       └── t4 => v4
+        ├── 序列 4
+        │   ├── xxy_prome_api_request_total{code="400002",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"}
+        │   └── 最近 5 分钟内的采样点
+        │       ├── t1 => v1
+        │       ├── t2 => v2
+        │       ├── t3 => v3
+        │       └── t4 => v4
+        └── 序列 5
+            ├── xxy_prome_api_request_total{code="400003",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"}
+            └── 最近 5 分钟内的采样点
+                ├── t1 => v1
+                ├── t2 => v2
+                ├── t3 => v3
+                └── t4 => v4
+```
+
+加 label 条件时：
+
+```promql
+xxy_prome_api_request_total{status="400"}[5m]
+```
+
+拆开是：
+
+```text
+xxy_prome_api_request_total{status="400"}[5m]
+└── range vector
+    ├── 时间范围
+    │   └── 最近 5 分钟
+    │
+    └── 只保留 status="400" 的时间序列
+        ├── 序列 1
+        │   ├── xxy_prome_api_request_total{code="400001",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"}
+        │   └── 最近 5 分钟内的采样点
+        │       ├── t1 => v1
+        │       ├── t2 => v2
+        │       ├── t3 => v3
+        │       └── t4 => v4
+        ├── 序列 2
+        │   ├── xxy_prome_api_request_total{code="400002",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"}
+        │   └── 最近 5 分钟内的采样点
+        │       ├── t1 => v1
+        │       ├── t2 => v2
+        │       ├── t3 => v3
+        │       └── t4 => v4
+        └── 序列 3
+            ├── xxy_prome_api_request_total{code="400003",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"}
+            └── 最近 5 分钟内的采样点
+                ├── t1 => v1
+                ├── t2 => v2
+                ├── t3 => v3
+                └── t4 => v4
+```
 
 ---
 
@@ -94,6 +203,44 @@ sum(http_requests_total) by (job)
 
 ```text
 把同一个 job 下的多条时间序列加起来
+```
+
+例如本地指标：
+
+```promql
+sum by (status) (xxy_prome_api_request_total)
+```
+
+计算过程：
+
+```text
+sum by (status) (xxy_prome_api_request_total)
+└── 第 1 步：取出当前时刻的所有序列
+    ├── xxy_prome_api_request_total{code="0",method="POST",path="/v1/chat/completion",status="0",type="request",version="1.0"} 7
+    ├── xxy_prome_api_request_total{code="0",method="POST",path="/v1/chat/completion",status="200",type="success",version="1.0"} 4
+    ├── xxy_prome_api_request_total{code="400001",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 1
+    ├── xxy_prome_api_request_total{code="400002",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 1
+    └── xxy_prome_api_request_total{code="400003",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 1
+
+└── 第 2 步：按 status 分组
+    ├── status="0"
+    │   └── 7
+    ├── status="200"
+    │   └── 4
+    └── status="400"
+        ├── 1
+        ├── 1
+        └── 1
+
+└── 第 3 步：每组内求和
+    ├── status="0"   => 7
+    ├── status="200" => 4
+    └── status="400" => 1 + 1 + 1 = 3
+
+└── 第 4 步：输出新的 instant vector
+    ├── {status="0"}   7
+    ├── {status="200"} 4
+    └── {status="400"} 3
 ```
 
 常见聚合函数：
@@ -124,6 +271,38 @@ max_over_time(cpu_usage[5m])
 
 ```text
 每条 cpu_usage 时间序列，在最近 5 分钟内取最大值
+```
+
+例如：
+
+```promql
+max_over_time(xxy_prome_api_request_total[5m])
+```
+
+计算过程：
+
+```text
+max_over_time(xxy_prome_api_request_total[5m])
+└── 输入：range vector
+    ├── 序列 1：xxy_prome_api_request_total{code="0",method="POST",path="/v1/chat/completion",status="0",type="request",version="1.0"} 的窗口采样点
+    ├── 序列 2：xxy_prome_api_request_total{code="0",method="POST",path="/v1/chat/completion",status="200",type="success",version="1.0"} 的窗口采样点
+    ├── 序列 3：xxy_prome_api_request_total{code="400001",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 的窗口采样点
+    ├── 序列 4：xxy_prome_api_request_total{code="400002",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 的窗口采样点
+    └── 序列 5：xxy_prome_api_request_total{code="400003",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 的窗口采样点
+
+└── 对每条序列分别计算
+    ├── 序列 1：取这串采样点里的最大值
+    ├── 序列 2：取这串采样点里的最大值
+    ├── 序列 3：取这串采样点里的最大值
+    ├── 序列 4：取这串采样点里的最大值
+    └── 序列 5：取这串采样点里的最大值
+
+└── 输出：instant vector
+    ├── 序列 1 => 最近 5 分钟内最大值
+    ├── 序列 2 => 最近 5 分钟内最大值
+    ├── 序列 3 => 最近 5 分钟内最大值
+    ├── 序列 4 => 最近 5 分钟内最大值
+    └── 序列 5 => 最近 5 分钟内最大值
 ```
 
 常见区间函数：
@@ -250,6 +429,38 @@ sum(rate(http_requests_total[5m])) by (service)
 
 表示每个 service 的每秒请求数。
 
+例如：
+
+```promql
+rate(xxy_prome_api_request_total[5m])
+```
+
+计算过程：
+
+```text
+rate(xxy_prome_api_request_total[5m])
+└── 输入：range vector
+    ├── 序列 1：xxy_prome_api_request_total{code="0",method="POST",path="/v1/chat/completion",status="0",type="request",version="1.0"} 的 counter 采样点
+    ├── 序列 2：xxy_prome_api_request_total{code="0",method="POST",path="/v1/chat/completion",status="200",type="success",version="1.0"} 的 counter 采样点
+    ├── 序列 3：xxy_prome_api_request_total{code="400001",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 的 counter 采样点
+    ├── 序列 4：xxy_prome_api_request_total{code="400002",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 的 counter 采样点
+    └── 序列 5：xxy_prome_api_request_total{code="400003",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 的 counter 采样点
+
+└── 对每条序列分别计算
+    ├── 序列 1：取窗口内所有采样点，计算 counter 增长，处理 reset，边界外推，除以 300 秒
+    ├── 序列 2：取窗口内所有采样点，计算 counter 增长，处理 reset，边界外推，除以 300 秒
+    ├── 序列 3：取窗口内所有采样点，计算 counter 增长，处理 reset，边界外推，除以 300 秒
+    ├── 序列 4：取窗口内所有采样点，计算 counter 增长，处理 reset，边界外推，除以 300 秒
+    └── 序列 5：取窗口内所有采样点，计算 counter 增长，处理 reset，边界外推，除以 300 秒
+
+└── 输出：instant vector
+    ├── 序列 1 => 每秒速率
+    ├── 序列 2 => 每秒速率
+    ├── 序列 3 => 每秒速率
+    ├── 序列 4 => 每秒速率
+    └── 序列 5 => 每秒速率
+```
+
 ---
 
 ### 6.2 `increase`
@@ -268,6 +479,92 @@ increase(http_requests_total[5m])
 
 ```text
 increase ≈ rate * 时间窗口秒数
+```
+
+例如：
+
+```promql
+increase(xxy_prome_api_request_total[5m])
+```
+
+计算过程：
+
+```text
+increase(xxy_prome_api_request_total[5m])
+└── 输入：range vector
+    ├── 序列 1：xxy_prome_api_request_total{code="0",method="POST",path="/v1/chat/completion",status="0",type="request",version="1.0"} 的 counter 采样点
+    ├── 序列 2：xxy_prome_api_request_total{code="0",method="POST",path="/v1/chat/completion",status="200",type="success",version="1.0"} 的 counter 采样点
+    ├── 序列 3：xxy_prome_api_request_total{code="400001",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 的 counter 采样点
+    ├── 序列 4：xxy_prome_api_request_total{code="400002",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 的 counter 采样点
+    └── 序列 5：xxy_prome_api_request_total{code="400003",method="POST",path="/v1/chat/completion",status="400",type="error",version="1.0"} 的 counter 采样点
+
+└── 对每条序列分别计算
+    ├── 序列 1：取窗口内所有采样点，计算 counter 增长，处理 reset，边界外推
+    ├── 序列 2：取窗口内所有采样点，计算 counter 增长，处理 reset，边界外推
+    ├── 序列 3：取窗口内所有采样点，计算 counter 增长，处理 reset，边界外推
+    ├── 序列 4：取窗口内所有采样点，计算 counter 增长，处理 reset，边界外推
+    └── 序列 5：取窗口内所有采样点，计算 counter 增长，处理 reset，边界外推
+
+└── 输出：instant vector
+    ├── 序列 1 => 最近 5 分钟内增加量
+    ├── 序列 2 => 最近 5 分钟内增加量
+    ├── 序列 3 => 最近 5 分钟内增加量
+    ├── 序列 4 => 最近 5 分钟内增加量
+    └── 序列 5 => 最近 5 分钟内增加量
+```
+
+具体到一条序列：
+
+```promql
+increase(xxy_prome_api_request_total{status="200",type="success"}[5m])
+```
+
+如果最近 5 分钟采样点是：
+
+```text
+12:00:00 => 4
+12:01:00 => 5
+12:02:00 => 5
+12:03:00 => 6
+12:04:00 => 7
+12:05:00 => 9
+```
+
+没有 reset 时，直觉上接近：
+
+```text
+9 - 4 = 5
+```
+
+但 `increase` 不是只拿开头和结尾两个点硬减，它会基于窗口内采样点计算增长，并对窗口边界做外推。
+
+如果中间服务重启，counter 归零：
+
+```text
+12:00:00 => 7
+12:01:00 => 8
+12:02:00 => 0
+12:03:00 => 1
+12:04:00 => 2
+12:05:00 => 4
+```
+
+简单首尾相减会得到：
+
+```text
+4 - 7 = -3
+```
+
+这个结果是错的。`increase` 会识别 counter reset，按增长段计算：
+
+```text
+7 -> 8  增加 1
+8 -> 0  reset，不按负数算
+0 -> 1  增加 1
+1 -> 2  增加 1
+2 -> 4  增加 2
+
+increase 约等于 1 + 1 + 1 + 2 = 5
 ```
 
 ---
@@ -317,8 +614,6 @@ sum(rate(http_requests_total[5m])) by (service)
 ```
 
 其他标签如 instance、status、method 会被聚合掉。
-
----
 
 ### 7.2 `without`
 
@@ -454,7 +749,10 @@ observe(0.12)
 observe(0.35)
 observe(0.80)
 observe(0.20)
-...
+observe(0.42)
+observe(1.10)
+observe(0.18)
+observe(0.67)
 ```
 
 Summary 不会保存所有原始样本，否则内存会无限增长。
