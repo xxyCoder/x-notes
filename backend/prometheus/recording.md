@@ -185,6 +185,9 @@ groups:
 
 ```text
 group    一组规则
+name     是这个规则组的名字
+            同一个组（相同的 name）内的规则是“串行（按顺序）”执行的。 这意味着，如果你在这个组里写了多条 rule，排在后面的 rule 可以直接使用排在前面的 rule 刚刚计算出来的结果
+            不同组（不同的 name）之间的规则是“并发（同时）”执行的
 interval 这组规则多久执行一次
 record   新生成的 metric name
 expr     要执行的 PromQL 表达式
