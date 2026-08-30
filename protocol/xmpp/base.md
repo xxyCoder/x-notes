@@ -73,14 +73,14 @@ XMPP 顶层的三种核心 stanza 是：
 
 “服务端不认识 `xmlns` 也会原封不动透传”这个理解成立，但需要满足以下条件：
 
-1. 扩展内容必须放在合法的 `<message/>`、`<presence/>` 或 `<iq/>` stanza 内。顶层一级元素只有三类 stanza（§4.1 定义：depth=1、限定 jabber:client/server 命名空间）和各协商协议定义的元素；自造的未知顶层元素无应用语义；协议为其定义了专门的流错误条件 `unsupported-stanza-type`（RFC6120 §4.9.3.24：不支持的一级流子元素），服务器也可能选择忽略——行为不统一。
+1. 扩展内容必须放在合法的 `<message/>`、`<presence/>` 或 `<iq/>` stanza 内。顶层一级元素只有三类 stanza（RFC6120 §4.1 定义：depth=1、限定 jabber:client/server 命名空间）和各协商协议定义的元素；自造的未知顶层元素无应用语义；协议为其定义了专门的流错误条件 `unsupported-stanza-type`（RFC6120 §4.9.3.24：不支持的一级流子元素），服务器也可能选择忽略——行为不统一。
 2. 服务端在这里只负责把 stanza 路由给其他实体；如果服务端本身就是目标接收方，则可能需要理解和处理这个扩展。
 3. “原封不动”表示扩展内容的语义和 XML 结构应被保留，不保证传输前后的 XML 字节完全相同，例如 namespace 前缀可能发生变化。
 4. 最终接收方不认识扩展时（RFC6120 §8.4 处理规则）：
    - `message` 且未知扩展是**唯一子元素**：MUST 二选一——忽略整条消息，或返回错误（SHOULD 为 `service-unavailable`）；
    - `message`/`presence` 含未知部分：MUST 忽略该部分；
    - `presence` 且未知扩展是唯一子元素：MUST 忽略该子元素；
-   - `iq get/set`：**MUST 返回 `service-unavailable`**（§10.3.3）。
+   - `iq get/set`：**MUST 返回 `service-unavailable`**（RFC6120 §10.3.3）。
 
 ## 总结
 
@@ -93,7 +93,7 @@ XMPP 顶层的三种核心 stanza 是：
 # XMPP-C2S JID 寻址（RFC6120 / RFC7622）
 
 > 
-> JID 是XMPP实体的地址，所有 `<message>`、`<iq>`、`<presence>` 报文依靠JID完成寻址与路由。
+> JID 是 XMPP 实体的地址，所有 `<message>`、`<iq>`、`<presence>` 报文依靠 JID 完成寻址与路由。
 
 ## JID 完整语法结构
 
@@ -110,7 +110,6 @@ localpart@domainpart/resourcepart
 > 
 > 分隔符说明：
 > 
-> 
 > - `@`：分割 localpart 与 domainpart
 > - `/`：分割 domainpart 与 resourcepart
 
@@ -119,22 +118,45 @@ localpart@domainpart/resourcepart
 RFC6120 §1.4 按语义分**两类**，每类各含两种语法形态：
 
 1. **bare-JID 裸JID（无 resourcepart）**
-- `localpart@domainpart`：代表**账号本体**（RFC7622：account 本身，与在线与否无关）；发给裸JID的 stanza 由服务端按投递规则决定投给哪些在线资源（见下文，非正式的"全部在线设备集合"说法只是常见理解）。
-- `domainpart`（如 `demo.com`）：**也是裸JID**（RFC6120 §1.4 原文：of the form \<domainpart\> for a server）——表示服务器/服务组件；客户端常用：服务发现、ping、注册等服务器级 iq 都以它寻址。
-2. **full-JID 完整JID（带 resourcepart）**
+- `localpart@domainpart`：代表**账号本体**；发给裸 JID 的 stanza 由服务端按投递规则决定投给哪些在线资源（见下文，非正式的"全部在线设备集合"说法只是常见理解）。
+- `domainpart`（如 `demo.com`）：**也是裸 JID**）——表示服务器/服务组件；客户端常用：服务发现、ping、注册等服务器级 iq 都以它寻址。
+2. **full-JID 完整 JID（带 resourcepart）**
 - `localpart@domainpart/resourcepart`：精确定位账号下**某一个具体资源**（resourcepart 是 opaque identifier，RFC7622 §3.4；C2S 场景通常对应一台设备/一条连接）。
-- `domainpart/resourcepart`（如 `demo.com/shakespeare`）：**也是完整JID**（RFC6120 §1.4 原文：for a particular resource or script associated with a server）——服务端资源/脚本标识，C2S 聊天场景罕见。
+- `domainpart/resourcepart`（如 `demo.com/shakespeare`）：**也是完整 JID**——服务端资源/脚本标识，C2S 聊天场景罕见。
 
 ## 报文路由投递规则
 
 1. `to` 设置为 **bare-JID（裸JID）**
+
 例：`to="bob@demo.com"`
-服务端收到后投递给账号的在线资源，协议允许两种策略（RFC6121 §8.5.2.1.1）：投给"最活跃"资源（most available：由服务端**实现自定义算法**选定，最高优先级只是常见因素之一），或投给全部非负优先级资源；且各消息类型规则不同：`normal` 投非负资源、`chat` 在多资源时二选一：(a) 投给"最活跃"资源（**无需 opt-in**）或 (b) 投给**明确 opt-in 接收全部 chat** 的非负资源集合（原文 "opted in to receive chat messages"）；单一非负资源则 MUST 投给它、`headline` 必须投全部非负资源、`groupchat` 不投给任何资源、MUST 返回错误（SHOULD 为 `service-unavailable`）；负优先级一律排除。
-注意：`iq` 发裸JID不广播、也不投给任何资源，由服务端代表账号直接应答（RFC6121 §8.5.2.1.3：server itself MUST reply、MUST NOT deliver to any resource；无法应答则 `service-unavailable`，§8.5.2.2.3）。
-普通一对一聊天消息，通常使用裸JID作为接收地址。
+
+服务端按 stanza 类型路由；负优先级资源始终不参与投递：
+
+`most available resource(s)` 是 RFC6121 的投递术语，指服务端从非负优先级资源中，按自身实现的算法选出的一个或多个首选资源：
+
+- RFC6121 不规定统一的选择算法。
+- 服务端可以把最高 `<priority/>` 的一个或多个资源视为 most available，但这只是 RFC 给出的实现示例。
+- 它不等于“最近活跃的设备”，也不保证只选一个资源。
+
+各 stanza 类型的处理规则：
+
+- `normal`：在非负优先级资源中投递。
+- `chat`：仅有一个非负优先级资源时 MUST 投给该资源；存在多个时，服务端必须二选一：投给它判定的一个或多个 most available resource（这些资源无需 opt-in），或投给已明确 opt-in 接收全部 `chat` 的非负优先级资源集合。
+- `headline`：MUST 投给全部非负优先级资源。
+- `groupchat`：这里限制的是 `to="bob@demo.com"` 这种**普通用户 bare JID**，不是禁止群聊消息投递。
+  - 合法的 MUC 群聊消息应发给房间 bare JID，例如 `room@conference.demo.com`；MUC 服务再把消息广播给房间成员对应的 full JID。
+  - 普通用户 bare JID 不是群聊房间，账号服务器不能把 `groupchat` 当成 `normal` / `chat`，再自行选择某个用户资源投递。因此 MUST NOT 投给该账号的任何资源，并 MUST 返回错误（SHOULD 为 `service-unavailable`）。
+- `iq`：不广播，也不投给账号的任何资源；服务端 MUST 直接应答，无法处理时返回 `service-unavailable`。
+
+参见 RFC6121 §8.5.2.1.1、RFC6121 §8.5.2.1.3、RFC6121 §8.5.2.2.3。
+
+普通一对一聊天消息，通常使用裸 JID 作为接收地址。
+
 2. `to` 设置为 **full-JID（完整JID）**
+
 例：`to="bob@demo.com/pc"`
-投递给该 resource 对应的具体资源/会话；多资源在线时 `chat` 按 RFC6121 §8.5.4 为 **D/A***：必须投给目标资源，服务器也可（经客户端 opt-in）额外投给其他非负资源（Message Carbons 等扩展同样产生副本）——"其他资源绝不收到"不成立。若该 resource 不在线，按「XMPP 路由寻址」的规则处理。
+
+消息定向投递给该 resource。对于 `chat`，服务端 MUST 投给目标资源；经客户端 opt-in，也可向其他非负优先级资源发送副本，Message Carbons 等扩展同样可能产生副本。因此，full JID 不保证“其他资源绝不会收到”。目标 resource 不在线时，按「XMPP 路由寻址」规则处理（RFC6121 §8.5.4）。
 
 ## stanza 的 from、to 属性
 
@@ -144,8 +166,8 @@ RFC6120 §1.4 按语义分**两类**，每类各含两种语法形态：
 - `from`：发送方实体JID
 
 > 
-> 实践规则：**客户端向外发送报文时通常不填 from 属性**（客户端省略是正确实践，不是强制义务；该条款的强制对象是服务端，见下）。
-> XMPP服务端会强制重写、覆盖from字段（RFC6120 §8.1.2.1：MUST add or override），替换成客户端当前真实的 full-JID；订阅类 presence 例外，服务端盖的是 bare JID。客户端填入的from内容会被直接覆盖，用于防止身份伪造。
+> 实践规则：**客户端向外发送报文时通常不填 from 属性**。
+> XMPP 服务端会强制重写、覆盖 from 字段（RFC6120 §8.1.2.1：MUST add or override），替换成客户端当前真实的 full-JID；订阅类 presence 例外，服务端盖的是 bare JID。客户端填入的 from 内容会被直接覆盖，用于防止身份伪造。
 
 示例标准聊天message报文
 
@@ -167,11 +189,16 @@ RFC6120 §1.4 按语义分**两类**，每类各含两种语法形态：
 
 ## JID 协议坑点
 
-1. resourcepart **区分大小写**；`pc` 与 `PC` 是两个完全不同的资源。
-2. 如果同一个账号，使用**完全相同的resourcepart**建立新连接，RFC6120 §7.7.2.2 允许三种处理：①服务端给新连接改写一个不同的resource（**RFC推荐**）；②拒绝新连接、保留旧会话；③踢掉旧会话让新连接顶替（早期服务器传统行为，RFC标注为**不建议**——两台设备可能互踢死循环）。RFC 记载③曾是"早期服务器的传统行为"（§7.7.2.2 原文：traditional behavior of early XMPP server implementations）；当前各服务端策略不一（未逐一核实），"踢旧"是常见经验说法而非协议推荐。
-3. roster（好友花名册）按 bare-JID 维护条目：RFC6121 的 roster 语义、示例与订阅状态全部以 bare JID 记账，resource 不入册（协议未以 MUST 条文显式限定，属语义约定而非硬性条款）。注意：resourcepart 是 opaque identifier，字符串本身可稳定、可复用；"动态"的是它绑定的会话，不是标识符本身。
-4. 收到好友上下线presence推送报文时，报文的`from`是对方的full-JID，可以用来区分对方哪一个资源/客户端实例上线/下线。
-5. localpart、domainpart、resourcepart都有字符集、长度限制，RFC规定不可以随意填充特殊字符。
+1. resourcepart **区分大小写**：`pc` 与 `PC` 是两个不同资源。
+2. 相同 resourcepart 发生连接冲突时，服务端可以：
+   - 为新连接分配其他 resource（RFC 推荐）；
+   - 拒绝新连接；
+   - 断开旧连接，由新连接接管（早期惯例，RFC 不推荐）。
+
+   具体策略取决于服务端实现，不能默认一定“踢旧”（RFC6120 §7.7.2.2）。
+3. roster 按 bare JID 维护，resource 不入册。resourcepart 可以稳定复用，变化的是它绑定的会话，而非标识符本身。
+4. presence 的 `from` 是 full JID，可用于区分具体资源的上线和下线。
+5. localpart、domainpart、resourcepart 均受字符集和长度规则约束，不能任意填入特殊字符。
 
 
 # XMPP 路由寻址
@@ -184,30 +211,109 @@ RFC6120 §1.4 按语义分**两类**，每类各含两种语法形态：
 
 ### C2S本地路由内部处理规则
 
-1. 如果报文目标指向**具体资源会话**
-    - **账号不存在**（RFC6121 §8.5.1，优先判断）：message（`type="error"` 的 MUST 静默忽略——回错会形成错误循环，RFC6120 §8.3.1 规则8）→ 其余类型：静默忽略或返回 `service-unavailable`，**不能离线存储**（§8.5.4 表1 "ACCOUNT DOES NOT EXIST / full" 各类型均为 S/E）；iq → MUST `service-unavailable`；presence 无 type/`unavailable` 及订阅四类 → MUST 静默忽略；**presence `probe` → 二选一：静默忽略，或返回 `type="unsubscribed"`**（§8.5.1 原文）。
-    - 账号存在、资源会话在线（§8.5.3.1 按类型）：
-        - `message`：MUST 投递到该精确资源（§8.5.4 full match 基本为 D）；`chat` 为 **D/A***——服务器可经客户端 opt-in 额外投给其他非负资源。
-        - iq `result`/`error`：MUST 投递；iq `get`/`set`：请求者与目标**未共享 presence**（无 both/from 订阅、无 directed presence）时，服务器 SHOULD NOT 投递、SHOULD 返回 `service-unavailable`（§8.5.3.1，防止在线状态泄露）。
-        - presence 无 type/`unavailable`：MUST 投递；订阅四类按 §3；`probe` 按 §4.3。
-    - 账号存在、资源会话不存在（§8.5.3.2 具体规则优先；RFC6120 §10.5.4 的"按裸JID处理"只是一般性 SHOULD）：
-        - `type="chat"`：唯一非负资源在线 → MUST 投给它；多个非负资源 → 按"最可用资源或 opted-in 资源集合"投递（同裸JID chat 规则）；**没有 available 或 connected 资源** → MUST 离线存储或返回 `service-unavailable`（§8.5.4 "ACCOUNT EXISTS, BUT NO ACTIVE RESOURCES / full" 的 chat 为 O/E）；**有 available 资源但全部为负优先级** → SHOULD 离线存储或返回错误（SHOULD 为 `service-unavailable`，§8.5.3.2.1）。
-        - `normal` / `groupchat` / `headline`：MUST 静默忽略或返回 `service-unavailable`（**不转投其他设备**）。
-        - `type="error"` 的 message：MUST 静默忽略（§8.5.3.2.1 末条，防错误循环）。
-        - presence：无 type/`unavailable` → MUST 静默忽略；`subscribe` → 按 §3.1.3 处理；`subscribed`/`unsubscribe`/`unsubscribed` → MUST 忽略；`probe` → 按 §4.3（§8.5.3.2.2）。
-        - `iq`：MUST 返回 `service-unavailable`。
+订阅类 `presence` 不是普通的在线状态广播，而是账号级 roster 状态变更：
+
+- `subscribe`（请求订阅）：full JID 目标 SHOULD 先改成 bare JID。除预授权、账号自动批准或服务协议允许外，服务端 MUST NOT 代替用户自动批准。若请求者已经拥有订阅，服务端 MUST 直接回复 `subscribed`；若命中预授权，则 SHOULD 直接回复。否则，有 available resource 时 MUST 把请求投给全部 available resource；没有时 MUST 保存完整请求，并在资源每次变为 available 时继续投递，直到用户批准或拒绝。同一请求者的重复申请下次最多投递一条，且批准前不得把请求者加入 roster（RFC6121 §3.1.3）。
+- `subscribed`（批准订阅）：仅当 roster 中存在待批准的出站订阅时才生效。服务端 MUST 先把通知投给全部 interested resource，再把 roster 状态更新为 `to` 或 `both` 并推送，随后把联系人各在线资源的当前 presence 投给用户的 available resource；状态不匹配时 MUST 静默忽略（RFC6121 §3.1.6）。
+- `unsubscribed`（拒绝或取消已授予的订阅）：仅当当前状态为 `to` 或 `both` 时生效。服务端 MUST 把通知投给全部 interested resource，将 roster 更新为 `none` 或 `from`，并投递相应的 `unavailable`；状态不匹配时 MUST 静默忽略（RFC6121 §3.2.3）。
+- `unsubscribe`（主动取消对联系人的订阅）：仅当对端 roster 状态为 `from` 或 `both` 时生效。服务端 MUST 把通知投给全部 interested resource，将 roster 更新为 `none` 或 `to`，并从所有 available resource 向请求者发送 `unavailable`；状态不匹配时通常 MUST 静默忽略。若只存在未入 roster 的待处理订阅请求，则删除该请求记录（RFC6121 §3.3.3）。
+
+`probe` 用于查询当前 presence，服务端按目标和订阅权限应答：
+
+- 目标为 bare JID：账号不存在或请求者无权查看时，服务端 SHOULD 返回 bare JID 发出的 `unsubscribed`；账号已迁移时 SHOULD 返回 `redirect` 或 `gone`；无 available resource 时 SHOULD 返回 bare JID 发出的 `unavailable`；存在 available resource 时 MUST 返回每个资源最近一次无 `to` 的完整 presence，`from` 为各自 full JID（RFC6121 §4.3.2）。
+- 目标为 full JID：不得返回其他 resource 的 presence。账号存在、目标 resource 匹配且请求者有权限时，MUST 返回该资源的 available presence，并 SHOULD 只暴露“在线”这一事实；目标 resource 不匹配时不得转查或返回其他资源（RFC6121 §4.3.2）。
+
+1. 如果报文目标指向 **具体资源会话**
+
+   **账号不存在**（RFC6121 §8.5.1，优先判断）
+
+   - `message`：
+     - `type="error"`：MUST 静默忽略。回错会形成错误循环（RFC6120 §8.3.1 规则8）。
+     - 其他类型：静默忽略或返回 `service-unavailable`，**不能离线存储**（RFC6121 §8.5.4 表1中 `ACCOUNT DOES NOT EXIST / full` 均为 S/E）。
+   - `iq`：MUST 返回 `service-unavailable`。
+   - `presence`：
+     - 无 type、`unavailable` 及订阅四类：MUST 静默忽略。
+     - `probe`：静默忽略，或返回 `type="unsubscribed"`。
+
+   **账号存在，目标资源在线**（RFC6121 §8.5.3.1）
+
+   - `message`：MUST 投递到该精确资源。`chat` 在 RFC6121 §8.5.4 表中为 D/A*：必须投给目标资源；经客户端 opt-in，也可额外投给其他非负优先级资源。
+   - `iq result/error`：MUST 投递。
+   - `iq get/set`：请求者与目标未共享 presence（无 both/from 订阅、无 directed presence）时，服务端 SHOULD NOT 投递，并 SHOULD 返回 `service-unavailable`，以免泄露在线状态。
+   - `presence`：
+     - 无 type、`unavailable`：MUST 投递。
+     - `subscribe`、`subscribed`、`unsubscribe`、`unsubscribed`：不按目标 resource 单独投递；服务端校验当前订阅状态，更新账号级 roster，并把有效通知和 roster push 发给全部 interested resource。
+     - `probe`：只允许返回目标 resource 的状态，不得泄露其他 resource。
+
+   **账号存在，目标资源离线**（RFC6121 §8.5.3.2）
+
+   - `chat`：
+     - 唯一非负优先级资源在线：MUST 投给该资源。
+     - 多个非负优先级资源在线：服务端必须二选一：投给按自身算法选出的一个或多个 most available resource，或投给已 opt-in 接收全部 `chat` 的非负优先级资源集合；与裸 JID 的 `chat` 规则相同。
+     - 没有 available 或 connected resource：MUST 离线存储或返回 `service-unavailable`（RFC6121 §8.5.4 表1中 `ACCOUNT EXISTS, BUT NO ACTIVE RESOURCES / full` 的 `chat` 为 O/E）。
+     - 存在 available resource，但优先级全部为负：SHOULD 离线存储或返回错误；错误 SHOULD 为 `service-unavailable`（RFC6121 §8.5.3.2.1）。
+   - `normal`、`groupchat`、`headline`：MUST 静默忽略或返回 `service-unavailable`，**不转投其他设备**。
+   - `message type="error"`：MUST 静默忽略，避免形成错误循环（RFC6121 §8.5.3.2.1）。
+   - `presence`：
+     - 无 type、`unavailable`：MUST 静默忽略。
+     - `subscribe`：忽略离线的 resourcepart，按 bare JID 的账号级订阅请求处理；没有 available resource 时保存完整请求，等资源变为 available 后投递，直到用户批准或拒绝。
+     - `subscribed`、`unsubscribe`、`unsubscribed`：MUST 忽略。
+     - `probe`：不得转查或返回其他 resource；仍需先执行账号不存在、无查看权限和账号迁移的响应规则（RFC6121 §4.3.2、RFC6121 §8.5.3.2.2）。
+   - `iq`：MUST 返回 `service-unavailable`。
+
+   RFC6121 §8.5.3.2 的具体规则优先；RFC6120 §10.5.4“按裸 JID 处理”只是一般性 SHOULD。
 
 2. 如果报文目标指向**用户账号本身，不指定设备**
-    - **至少存在一个 available 或 connected resource**（负优先级资源也是 available resource，§8.5.2.1）：
-        - message：按投递策略二选一（§8.5.2.1.1，规则随消息类型不同）；**负优先级资源一律不收 message**（原文 "the server MUST NOT deliver the stanza to any available resource with a negative priority"，仅限 message）——若全部资源均为负优先级，`normal`/`chat` SHOULD 离线存储或返回 `service-unavailable`。
-        - presence 无 type/`unavailable`：MUST 投给**全部 available 资源（含负优先级资源）**（§8.5.2.1.2）；订阅四类按 §3、`probe` 按 §4.3。
-        - iq：服务端代表账号处理（§8.5.2.1.3）。
-    - **没有任何 available 或 connected resource**（§8.5.2.2）：`normal`/`chat` → SHOULD 离线存储或返回 `service-unavailable`；`groupchat` → MUST 返回错误；`headline`/`error` → MUST 静默忽略；`iq` → 服务端代表账号应答，无法应答则 `service-unavailable`（§8.5.2.2.3）；presence 无 type/`unavailable` → SHOULD 静默忽略（§8.5.2.2.2），订阅四类按 §3、`probe` 按 §4.3。
-    - 离线投递对象：按 XEP-0160 §2 的**推荐流程（RECOMMENDED，Informational 文档）**：触发条件是资源向服务器发送**非负优先级的 available presence**（原文：When the recipient next sends non-negative available presence to the server, the server delivers the message to the resource that has sent that presence）——即最先发送非负优先级 available presence 的资源接收离线消息、后续资源收不到；**具体服务器可以采用其他策略**（RFC6121 本身不规定投给哪个资源；多设备同步历史消息需 MAM）。注意不限于 initial presence：资源先发负优先级 presence 不会立即触发，之后更新为非负优先级的 subsequent presence 也可以触发。
-    - （因果推测，非规范内容：服务端没有固定设备清单、离线投递只求至少送达一次——可解释"只给第一台"，但属推理。）
+
+   **至少存在一个 available 或 connected resource**（负优先级资源也是 available resource，RFC6121 §8.5.2.1）
+
+   - `message`：
+     - 按投递策略二选一，规则随消息类型不同（RFC6121 §8.5.2.1.1）。
+     - **负优先级资源一律不收 message**。原文："the server MUST NOT deliver the stanza to any available resource with a negative priority"。该规则仅限 `message`。
+     - 若全部资源均为负优先级，`normal` / `chat` SHOULD 离线存储或返回 `service-unavailable`。
+   - `presence`：
+     - 无 type、`unavailable`：MUST 投给**全部 available 资源，包括负优先级资源**（RFC6121 §8.5.2.1.2）。
+     - `subscribe`、`subscribed`、`unsubscribe`、`unsubscribed`：服务端校验当前订阅状态，更新账号级 roster，并把有效通知和 roster push 发给全部 interested resource；它们不按 message 的资源优先级策略投递。
+     - `probe`：有查看权限时 MUST 返回每个 available resource 最近一次无 `to` 的完整 presence；无权限时 SHOULD 返回 `unsubscribed`（RFC6121 §4.3.2）。
+   - `iq`：服务端代表账号处理（RFC6121 §8.5.2.1.3）。
+
+   **没有任何 available 或 connected resource**（RFC6121 §8.5.2.2）
+
+   - `normal` / `chat`：SHOULD 离线存储或返回 `service-unavailable`。
+   - `groupchat`：MUST 返回错误。
+   - `headline` / `error`：MUST 静默忽略。
+   - `iq`：服务端代表账号应答；无法应答时返回 `service-unavailable`（RFC6121 §8.5.2.2.3）。
+   - `presence`：
+     - 无 type、`unavailable`：SHOULD 静默忽略（RFC6121 §8.5.2.2.2）。
+     - `subscribe`：保存完整请求；资源变为 available 后继续投递，直到用户批准或拒绝。
+     - `subscribed`、`unsubscribe`、`unsubscribed`：服务端先校验 roster 的当前订阅状态；状态有效时更新 roster 并推送给 interested resource，没有 available resource 时 MAY 保存通知供下次上线时投递；状态不满足各自前置条件时 MUST 静默忽略。
+     - `probe`：请求者有查看权限时 SHOULD 返回 bare JID 发出的 `unavailable`；无权限时 SHOULD 返回 bare JID 发出的 `unsubscribed`（RFC6121 §4.3.2）。
+
+   **离线消息投给哪个资源**
+
+   XEP-0160 §2 给出的流程是 RECOMMENDED，且该文档为 Informational：
+
+   - 资源向服务端发送**非负优先级的 available presence**时，触发离线消息投递。
+   - 原文："When the recipient next sends non-negative available presence to the server, the server delivers the message to the resource that has sent that presence"。
+   - 最先发送该 presence 的资源收到离线消息，后续资源收不到。
+   - 具体服务端可以采用其他策略。RFC6121 不规定必须投给哪个资源；多设备同步历史消息需要 MAM。
+   - 触发条件不限于 initial presence：先发送负优先级 presence 不会触发；之后更新为非负优先级的 subsequent presence 仍可触发。
 
 ## 二、S2S远端路由处理
 
-本机只完成报文跨域转发（**仅当目标是远端用户/资源时**——目标是远端域 JID、组件或服务器级 iq 时，接收服务器本身就是处理方，不是转发者）；投递、存储由对方服务器执行。错误生成分两种（RFC6120 §10.4.3）：DNS 解析失败 / S2S 流无法建立 → **本机自己**生成 `remote-server-not-found` / `remote-server-timeout` 返还给发送者；远端已收到但无法投递 → 才由对方服务器生成错误并沿原路返回：
-1. 目标为具体资源会话：远端**先判断账号是否存在**，再完全按上文 C2S 本地 full-JID 规则处理——不能仅凭 resource 不匹配就推导为离线存储（账号不存在时只能静默忽略或报错）。
-2. 目标为用户账号：远端同样**先判断账号是否存在**，再按上文 C2S 本地裸JID 规则处理（账号存在且无可用资源时 `chat`/`normal` 才可能离线存储）。
+### S2S 的职责边界
+
+- 目标是远端用户或资源：本机只负责跨域转发，实际投递和存储由对方服务器完成。
+- 目标是远端域 JID、组件或服务器级 `iq`：接收服务器本身就是处理方，不再向用户或资源转发。
+
+### 错误由谁生成
+
+RFC6120 §10.4.3 区分两种情况：
+
+- DNS 解析失败或 S2S 流无法建立：**本机生成** `remote-server-not-found` 或 `remote-server-timeout`，返回给发送者。
+- 远端服务器已经收到 stanza，但无法完成投递：**远端服务器生成**错误，并沿原路返回。
+
+### 远端收到后的投递
+
+1. 目标为具体资源会话：远端必须**先判断账号是否存在**，再按 C2S 本地 full-JID 规则处理。不能只因 resource 不匹配就判定为离线存储；账号不存在时只能静默忽略或返回错误。
+2. 目标为用户账号：远端同样必须**先判断账号是否存在**，再按 C2S 本地 bare-JID 规则处理。只有账号存在且没有可用资源时，`chat` / `normal` 才可能进入离线存储。

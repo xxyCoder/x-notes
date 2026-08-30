@@ -1,10 +1,5 @@
 # XMPP-C2S 客户端上线流程（协议 RFC6120）
 
-> 
-> 前提：TCP连接已经建立完成，socket双向字节通道可用。
-> XMPP-stream：长XML流。`<stream:stream>` 只发送开始标签，**不中途闭合**；只有会话结束才输出 `</stream:stream>`。
-> 范围：本章为**经典流程**：STARTTLS→SASL→bind（RFC6120）→initial presence（`<presence>` stanza 本身由 RFC6120 §8.2.2 定义；initial presence、available 状态与广播等 IM/presence 会话语义属 RFC6121 §4.2）。现代客户端栈（xmpp.js 0.14 等）还支持 SASL2/Bind2（XEP-0388/XEP-0386）内联协商，流程有差异，不在本章范围。
-
 ## 阶段1：打开XML流
 
 1. 客户端向socket写入流开启头（**不自闭合，不写闭合标签**）
@@ -48,10 +43,10 @@
 
 > 
 > SASL报文独立命名空间 `urn:ietf:params:xml:ns:xmpp-sasl`，不属于三大stanza。
-> 作用：校验账号身份；认证成功仅确立**该连接协商上下文中的身份**（详见坑点4），不等于登录完成。
+> 作用：校验账号身份；认证成功仅确立**该连接协商上下文中的身份**，不等于登录完成。
 
 1. 客户端选择服务端支持的认证机制，发送认证报文 `<auth>`
-以PLAIN为例：账号密码按规则拼接后base64编码放到标签体内
+以 PLAIN 为例：账号密码按规则拼接后base64编码放到标签体内
 
 ```
 <auth xmlns="urn:ietf:params:xml:ns:xmpp-sasl" mechanism="PLAIN">AGFsaWNlAG15cGFzc3dvcmQ=</auth>
@@ -67,10 +62,10 @@
 
 协议规定行为：
 
-1. TCP连接**保持不断开，复用现有socket**；**禁止发送 `</stream:stream>`**。
-2. 在同一个socket上，**重新发送一份全新的 `<stream:stream>` 开启头**（**bind 在 SASL 成功前不得暴露——RFC6120 §7.4 MUST NOT**；认证前的 features 也可能同时含 STARTTLS 等其他能力；所以必须重开流才能看到 bind）。
+1. TCP 连接**保持不断开，复用现有socket**；**禁止发送 `</stream:stream>`**。
+2. 在同一个 socket 上，**重新发送一份全新的 `<stream:stream>` 开启头**（**bind 在 SASL 成功前不得暴露——RFC6120 §7.4 MUST NOT**；认证前的 features 也可能同时含 STARTTLS 等其他能力；所以必须重开流才能看到 bind）。
 3. 旧 XML stream 被替换；同一底层连接中的 SASL 协商结果继续有效，新流无需再次执行 SASL。
-4. 服务端回复新的stream头部，以及新版 `stream:features`，**MUST包含bind**（RFC6120 §7.4）；此外还可能附带其他能力（session、压缩、SM等），也可能没有——"可为空"指其他能力可为空，**bind 本身不能缺**
+4. 服务端回复新的 stream 头部，以及新版 `stream:features`，**MUST包含bind**（RFC6120 §7.4）；此外还可能附带其他能力（session、压缩、SM等），也可能没有——"可为空"指其他能力可为空，**bind 本身不能缺**
 
 ```
 <stream:features>
@@ -98,16 +93,16 @@
 > 
 > 协议行为（RFC6120 §6.4.5）：收到 `<failure>` 之后，**可以在当前流上直接重发 `<auth>` 重试**。
 > 前提：原文 "Where appropriate for the chosen SASL mechanism"——仅当所选机制适合重试，并非所有机制无条件适用。此前提下服务端 SHOULD 允许 2~5 次重试；超过上限，服务端 MUST 以流错误关流（SHOULD 为 `policy-violation`）。
-> 只有流被关后才需要：重建TCP，从打开stream开始完整重跑流程。
+> 只有流被关后才需要：重建 TCP，从打开 stream 开始完整重跑流程。
 > xmpp.js（0.14.0）不会自动重试 `<auth>`：收到 `<failure/>` 即抛出 SASLError、经 middleware 以 `error` 事件上抛（sasl/index.js L61-63、middleware/index.js L17）；它不因 SASL failure 主动断线——重连模块只在 `disconnect` 事件后调度（reconnect/index.js），是否重连取决于服务端关流或应用自行处理。实现策略，不是协议限制。
 
 ## 阶段3：Resource Bind 资源绑定
 
 > 
-> JID格式：`user@domain/resource`。
-> SASL只确认账号 `alice@demo.com`；bind申请 resourcepart（RFC7622 定义为 opaque identifier，通常用来标识一个客户端实例，不保证一一对应物理设备），拿到完整JID才算登录完成。
+> JID 格式：`user@domain/resource`。
+> SASL只确认账号 `alice@demo.com`；bind申请 resourcepart（RFC7622 定义为 opaque identifier，通常用来标识一个客户端实例，不保证一一对应物理设备），拿到完整 JID 才算登录完成。
 
-1. 客户端发送 iq-set 请求，iq必须携带id
+1. 客户端发送 iq-set 请求，iq 必须携带 id
 
 ```
 <iq type="set" id="bind-001">
@@ -115,7 +110,7 @@
 </iq>
 ```
 
-- bind内部为空：由服务端自动生成resource；
+- bind 内部为空：由服务端自动生成 resource；
 - 也可内部携带 `<resource>pc</resource>` 手动指定 resourcepart（客户端实例标识）。
 
 2. 服务端 iq-result 返回完整JID
@@ -128,7 +123,7 @@
 </iq>
 ```
 
-3. 登录完成后，客户端发送空presence报文广播上线状态，好友才能看见在线（注意：bind 完成即可**发送** stanza；**接收**取决于目标地址与路由——发往本 full-JID 的消息 connected 资源可收，发往裸JID 的消息按 available 资源路由、未发 initial presence 不保证收到。presence 决定 available 状态与 presence 推送，RFC6121 §4.2.2/§8.5）
+3. 登录完成后，客户端发送空 presence 报文广播上线状态，好友才能看见在线（注意：bind 完成即可**发送** stanza；**接收**取决于目标地址与路由——发往本 full-JID 的消息 connected 资源可收，发往裸 JID 的消息按 available 资源路由、未发 initial presence 不保证收到。presence 决定 available 状态与 presence 推送，RFC6121 §4.2.2/§8.5）
 
 ```
 <presence/>
@@ -148,16 +143,6 @@
 6. C→S：iq-set bind 请求
 7. S→C：iq-result 返回完整JID ✔登录完成
 8. C→S：`<presence/>` 广播上线
-
-## 协议层面坑点
-
-1. `<stream:stream>` **严禁自闭合**；不要随意输出 `</stream:stream>`。
-2. SASL成功必须重开 XML 流，不能直接发 bind。
-3. SASL认证失败收到`<failure>`，机制适合重试时**协议允许在当前流直接重发 `<auth>`**（2~5次，RFC6120 §6.4.5），超限服务端才以 `policy-violation` 流错误关流；“断开重走”是客户端实现选择。
-4. SASL 认证结果保留在**同一底层连接的协商上下文**中（实现层面常被表述为"身份附着在 TCP 连接"，注意这不是协议定义）；SASL 后规范要求重启 XML stream，但不因此再次执行 SASL。
-5. bind 是 iq-set，必须带 id。未 bind 时并非一律不能发：发给**服务器自身或自己账号**的 stanza 可被处理；发给**其他实体**的服务端 MUST NOT 处理并以 not-authorized 关流（RFC6120 §7.1）；bind 完成后才能正常收发。
-6. 获取完整JID ≠ 对外在线；必须发送 `<presence/>` 才进入 available、收到 presence 推送（发送能力不受影响；裸JID 来信的接收不保证，见阶段3注）。
-7. PLAIN 的 base64 只是编码，不是加密，公网环境必须搭配 TLS。
 
 ---
 

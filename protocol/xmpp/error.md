@@ -11,8 +11,6 @@ stream-error = **XML会话流级别错误**
 
 ## XML报文基础模板
 
-> 模板中的 `<!-- -->` 为**教学注释**：RFC6120 §11.1 禁止在 XML 流中发送注释，实际报文必须移除。
-
 ```
 <stream:error>
   <!-- 标准条件空元素，必选 -->
@@ -55,11 +53,15 @@ XML字节不满足Well-Formed语法；标签未闭合、标签不匹配、非法
 
 ## 开发要点
 
-1. 输出stream-error之后，**必须输出`</stream:stream>`**，不能只发error标签。
-2. TCP连接不一定立刻被操作系统关闭；客户端收到stream-error后，不要再发送任何XMPP报文。
+1. 输出 stream-error 之后，**必须输出`</stream:stream>`**，不能只发 error 标签。
+2. TCP 连接不一定立刻被操作系统关闭；客户端收到 stream-error 后，不要再发送任何 XMPP 报文。
 3. `<text>` 只是给人看的日志，**程序逻辑不要解析text字段**，只判断条件元素。
-4. 未认证的流，收到业务stanza → not-authorized，关流。
-5. 流错误均不可恢复（§4.9.1.1）：关流并按 §4.4 终止连接。`reset`（§4.9.3.16）**不是"可复用同一TCP"的例外**——它表示安全上下文失效/服务端有新特性需要重开流并**重新协商 TLS 与 SASL**；RFC 未规定复用同一 TCP，是否重连属实现策略（重连是常见做法）。
+4. 未认证的流，收到业务 stanza → not-authorized，关流。
+5. 流错误不能在当前 XML stream 内恢复：
+   - 发送 `<stream:error>` 后必须立即关闭 XML stream；收到对方的关闭标签或等待超时后，终止底层 TCP 连接（RFC6120 §4.9.1.1、RFC6120 §4.4）。
+   - `<reset/>` 也属于流错误，不是复用原 TCP 的 stream restart。它表示当前安全上下文不能继续使用，例如密钥或证书失效、TLS sequence number 用尽，或服务端需要提供新的安全关键特性。
+   - 客户端需要重新建立 TCP 和 XML stream，并重新协商 TLS、SASL；C2S 还需重新绑定 resource。旧安全上下文作废，TLS session resumption 也不能使用（RFC6120 §4.9.3.16）。
+   - 不要与 TLS / SASL 成功后的正常 stream restart 混淆：正常 restart 明确复用原 TCP，不发送 `</stream:stream>`（RFC6120 §4.3.3）。
 
 # XMPP stanza-error（RFC6120 §8.3）
 
@@ -142,26 +144,3 @@ message无id示例：
 - 目标不存在 → `type="cancel"` + `<item-not-found/>`
 - 权限拒绝 → `type="auth"` + `<forbidden/>`
 - 服务器过载 → `type="wait"` + `<resource-constraint/>`
-
-## 开发要点
-
-1. iq必须带id；message/presence协议允许不带id，但**无id的message error无法可靠匹配原始消息**，业务追踪消息失败建议主动设置id。
-2. 用id匹配应答，不要依赖到达顺序。RFC6120 §10.1 的强制有序**只作用于单一输入流上的处理与投递**；跨资源并发、多路径、断线恢复场景无顺序保证（也不是"协议允许乱序"）。
-3. 原始载荷回传是 MAY（courtesy）；自己实现应答方时建议带回，但作为请求方不得依赖它。
-4. `<error>` 的type要和错误条件语义匹配，不能随意填写。
-5. 只解析条件元素，不解析`<text>`文本。
-6. stanza-error**不会关闭XML流、不会关闭TCP**。
-7. 收到 error stanza **MUST NOT** 再返回 error（RFC6120 §8.3.1 规则8，防止错误循环）。
-
-## 关键对比（stream-error vs stanza-error）
-
-| 项目 | stream-error | stanza-error |
-| --- | --- | --- |
-| 层级 | 整个XML流会话 | iq/message/presence单条报文 |
-| 命名空间 | urn:ietf:params:xml:ns:xmpp-streams | urn:ietf:params:xml:ns:xmpp-stanzas |
-| id | 无id | iq必须id；message/presence可选 |
-| 原始载荷 | 不回传 | MAY回传（courtesy，不保证） |
-| 流状态 | XML流强制关闭；TCP按§4.4握手后终止 | XML流保持存活 |
-
-> 
-> 注意：存在同名条件，例如 `not-authorized`，既可以是stream-error条件，也可以是stanza-error条件，分属不同命名空间，触发场景完全不同。
